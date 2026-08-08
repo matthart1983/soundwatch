@@ -125,6 +125,13 @@ unsafe extern "C" {
         inListener: AudioObjectPropertyListenerProc,
         inClientData: *mut c_void,
     ) -> OSStatus;
+
+    fn AudioObjectRemovePropertyListener(
+        inObjectID: AudioObjectID,
+        inAddress: *const AudioObjectPropertyAddress,
+        inListener: AudioObjectPropertyListenerProc,
+        inClientData: *mut c_void,
+    ) -> OSStatus;
 }
 
 #[link(name = "CoreFoundation", kind = "framework")]
@@ -303,6 +310,19 @@ pub fn add_listener(
     data: *mut c_void,
 ) -> bool {
     unsafe { AudioObjectAddPropertyListener(id, a, f, data) == 0 }
+}
+
+/// Unregister a listener. The `(address, proc, data)` triple must match the one
+/// passed to [`add_listener`], which is how the HAL identifies the
+/// registration. Failure is expected and ignorable when the object has already
+/// gone away.
+pub fn remove_listener(
+    id: AudioObjectID,
+    a: &AudioObjectPropertyAddress,
+    f: AudioObjectPropertyListenerProc,
+    data: *mut c_void,
+) -> bool {
+    unsafe { AudioObjectRemovePropertyListener(id, a, f, data) == 0 }
 }
 
 #[cfg(test)]

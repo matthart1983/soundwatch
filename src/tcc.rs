@@ -170,10 +170,15 @@ pub fn adopt_own_identity() -> Result<std::convert::Infallible, String> {
     let exe_c = CString::new(exe.as_os_str().as_bytes())
         .map_err(|_| "own path contains a NUL byte".to_string())?;
 
-    // argv, verbatim, so flags survive the hand-off.
+    // argv, verbatim, so flags survive the hand-off. An argument that cannot be
+    // passed on is a hard failure rather than a silently emptied slot: dropping
+    // `--meter-input` here would leave the user staring at a meter they asked
+    // for and did not get, with nothing to explain it.
     let argv_owned: Vec<CString> = std::env::args_os()
-        .map(|a| CString::new(a.as_bytes()).unwrap_or_else(|_| CString::new("").unwrap()))
-        .collect();
+        .map(|a| {
+            CString::new(a.as_bytes()).map_err(|_| "an argument contains a NUL byte".to_string())
+        })
+        .collect::<Result<_, _>>()?;
     let mut argv: Vec<*mut c_char> = argv_owned.iter().map(|a| a.as_ptr() as *mut c_char).collect();
     argv.push(std::ptr::null_mut());
 

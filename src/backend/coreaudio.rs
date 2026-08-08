@@ -18,7 +18,8 @@
 //! Both need consent, and both fail soft: [`Caps`] reports what is actually
 //! live, the UI renders `--` for the rest, and the note says why.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::ffi::{self, AudioObjectID, AudioObjectPropertyAddress, AudioStreamBasicDescription};
@@ -30,6 +31,17 @@ use crate::model::{Caps, Device, Direction, Format, Snapshot, Stream, Timestamp}
 /// and lock-free; the 60-second window is reconstructed by sampling deltas.
 static XRUNS: AtomicU64 = AtomicU64::new(0);
 
+/// Devices this *process* has an overload listener on.
+///
+/// The HAL identifies a registration by `(object, address, proc, client data)`,
+/// and all four are the same for every `CoreAudio` here — the counter above is
+/// a static, so the callback has no per-instance state to carry. That makes the
+/// registration process-wide whether we track it that way or not: a second
+/// backend asking for the same listener is refused, and if each instance kept
+/// its own set it would conclude it had failed and quietly stop counting xruns.
+/// Tracking it where it actually lives is the honest version.
+static LISTENING: Mutex<BTreeSet<AudioObjectID>> = Mutex::new(BTreeSet::new());
+
 extern "C" fn overload_listener(
     _id: AudioObjectID,
     _n: u32,
@@ -38,6 +50,21 @@ extern "C" fn overload_listener(
 ) -> i32 {
     XRUNS.fetch_add(1, Ordering::Relaxed);
     0
+}
+
+/// `(register these, forget these)` given what exists and what we already hold.
+///
+/// Pulled out of [`CoreAudio::install_listeners`] so the bookkeeping can be
+/// tested against an imagined dock being plugged and unplugged, rather than
+/// against whatever happens to be connected to the machine running the suite.
+fn listener_delta(
+    present: &BTreeSet<AudioObjectID>,
+    registered: &BTreeSet<AudioObjectID>,
+) -> (Vec<AudioObjectID>, Vec<AudioObjectID>) {
+    (
+        present.difference(registered).copied().collect(),
+        registered.difference(present).copied().collect(),
+    )
 }
 
 /// Reverse-DNS names truncated into a 15-column field are useless — Apple's
@@ -56,7 +83,6 @@ fn friendly_name(raw: &str) -> String {
 
 pub struct CoreAudio {
     host: String,
-    listening: HashSet<AudioObjectID>,
     /// `(observed_at, count)` pairs, pruned to the trailing 60 seconds.
     xrun_window: VecDeque<(Timestamp, u32)>,
     last_xrun_total: u64,
@@ -104,7 +130,6 @@ impl CoreAudio {
 
         Self {
             host: ffi::hostname(),
-            listening: HashSet::new(),
             xrun_window: VecDeque::new(),
             last_xrun_total: 0,
             first_seen: HashMap::new(),
@@ -185,16 +210,54 @@ impl CoreAudio {
         })
     }
 
-    /// Attach an overload listener to every device we haven't hooked yet.
+    /// Keep an overload listener on exactly the devices that currently exist.
+    ///
+    /// Both halves matter. Interfaces are hot-plugged constantly in audio work,
+    /// and a session that runs for a day sees the same dock connect and
+    /// disconnect dozens of times. Only adding meant registrations accumulated
+    /// in the HAL for devices that were long gone, and `listening` grew without
+    /// bound; only removing on disconnect keeps both sides honest.
     fn install_listeners(&mut self) {
-        for id in Self::all_devices() {
-            if self.listening.contains(&id) {
-                continue;
-            }
-            let a = ffi::addr(ffi::DEV_PROCESSOR_OVERLOAD, ffi::SCOPE_GLOBAL);
+        let present: BTreeSet<AudioObjectID> = Self::all_devices().into_iter().collect();
+        let a = ffi::addr(ffi::DEV_PROCESSOR_OVERLOAD, ffi::SCOPE_GLOBAL);
+
+        // A poisoned lock would mean a panic while holding it, and the set is a
+        // BTreeSet of integers — there is nothing here to be left inconsistent.
+        let mut registered = LISTENING.lock().unwrap_or_else(|e| e.into_inner());
+        let (to_add, to_drop) = listener_delta(&present, &registered);
+
+        for id in to_add {
             if ffi::add_listener(id, &a, overload_listener, std::ptr::null_mut()) {
-                self.listening.insert(id);
+                registered.insert(id);
             }
+        }
+        // Unplugged. Removing is best-effort: the object may already be gone,
+        // in which case the HAL has forgotten us anyway.
+        for id in to_drop {
+            ffi::remove_listener(id, &a, overload_listener, std::ptr::null_mut());
+            registered.remove(&id);
+        }
+    }
+
+    /// Follow the default input device when the user changes it.
+    ///
+    /// An IOProc is bound to one device for its whole life, so switching from
+    /// the built-in microphone to an interface leaves the meter reading a
+    /// device nobody is talking into — a flat line that looks exactly like a
+    /// permission problem. Audio people swap interfaces constantly, so the
+    /// meter has to follow. Dropping the old meter stops and detaches it, which
+    /// also releases the device if we were the only client.
+    ///
+    /// The output tap needs no equivalent: it is a *global* tap of the system
+    /// mix, so it follows the default output on its own.
+    fn follow_default_input(&mut self) {
+        if !self.metering.input {
+            return;
+        }
+        let Some(live) = self.input.live() else { return };
+        let current = Self::default_device(false);
+        if current != Some(live.device()) {
+            self.input = Pending::spawn(super::input::InputMeter::start);
         }
     }
 
@@ -249,11 +312,19 @@ impl CoreAudio {
 
             let pid = ffi::get::<i32>(p, &ffi::addr(ffi::PROC_PID, ffi::SCOPE_GLOBAL));
 
-            // Never report ourselves. The metering tap makes this process look
-            // like it is capturing audio, which would put SoundWatch at the top
-            // of its own mic-in-use audit — an artefact of observing, not a fact
-            // about the system.
-            if pid == Some(std::process::id() as i32) {
+            // Whether to report ourselves depends on why we are in this list.
+            //
+            // The output tap alone is pure observation: it makes the process
+            // look like an audio client to the HAL without being one in any
+            // sense the user cares about, and putting SoundWatch at the top of
+            // its own mic-in-use audit would be an artefact of measuring rather
+            // than a fact about the machine.
+            //
+            // `--meter-input` is different. That opens a real capture stream —
+            // the indicator comes on and we are genuinely holding the
+            // microphone. A tool whose job is answering "what has my mic"
+            // must not exempt itself from the answer.
+            if pid == Some(std::process::id() as i32) && self.input.live().is_none() {
                 continue;
             }
             let app = pid
@@ -446,6 +517,7 @@ impl AudioBackend for CoreAudio {
     fn snapshot(&mut self) -> Snapshot {
         self.tap.poll();
         self.input.poll();
+        self.follow_default_input();
         self.install_listeners();
         let now = Timestamp::now();
 
@@ -612,6 +684,50 @@ mod tests {
         assert!(!be.caps().device_levels);
         assert!(!be.caps().input_levels);
         assert!(be.caps().note.is_some(), "a degraded field needs an explanation");
+    }
+
+    fn ids(v: &[AudioObjectID]) -> BTreeSet<AudioObjectID> {
+        v.iter().copied().collect()
+    }
+
+    #[test]
+    fn a_steady_device_list_re_registers_nothing() {
+        let devices = ids(&[1, 2, 3]);
+        let (add, drop) = listener_delta(&devices, &devices);
+        assert!(add.is_empty(), "re-registering on every tick");
+        assert!(drop.is_empty());
+    }
+
+    #[test]
+    fn plugging_an_interface_in_registers_only_the_new_one() {
+        let (add, drop) = listener_delta(&ids(&[1, 2, 3]), &ids(&[1, 2]));
+        assert_eq!(add, vec![3]);
+        assert!(drop.is_empty());
+    }
+
+    /// The half that was missing: a disconnected interface used to keep its
+    /// registration in the HAL forever, and the set grew for the life of the
+    /// process. A day of dock cycles is a lot of dead registrations.
+    #[test]
+    fn unplugging_an_interface_forgets_it() {
+        let (add, drop) = listener_delta(&ids(&[1, 2]), &ids(&[1, 2, 3]));
+        assert!(add.is_empty());
+        assert_eq!(drop, vec![3], "stale registration kept");
+    }
+
+    #[test]
+    fn swapping_one_interface_for_another_does_both() {
+        let (add, drop) = listener_delta(&ids(&[1, 4]), &ids(&[1, 3]));
+        assert_eq!(add, vec![4]);
+        assert_eq!(drop, vec![3]);
+    }
+
+    #[test]
+    fn real_devices_get_a_real_listener() {
+        let mut be = observer();
+        be.install_listeners();
+        let registered = LISTENING.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(!registered.is_empty(), "no device got an overload listener");
     }
 
     /// The silent-tap heuristic must not fire on a machine that is merely

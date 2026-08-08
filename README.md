@@ -131,7 +131,13 @@ Output has a tap API whose entire purpose is observation without participation.
 Input has no equivalent: reading a microphone level means *being* a microphone
 client. The indicator comes on, the device may be started if nothing else is
 using it, and this process appears in the very mic-in-use audit the stream table
-exists to show — which it reports honestly rather than filtering itself out.
+exists to show.
+
+It reports itself there, deliberately. With only the output tap running,
+SoundWatch hides itself — looking like an audio client to the HAL is an artefact
+of measuring, not a fact about your machine. With `--meter-input` it is really
+holding the microphone, and a tool whose job is answering *what has my mic*
+does not get to exempt itself from the answer.
 
 That is a decision for the user, so it lives behind `--meter-input` and the input
 meter reads `--` until you ask for it. Microphone consent fails the same quiet

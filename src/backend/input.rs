@@ -22,6 +22,10 @@ const K_AUDIO_FORMAT_FLAG_IS_FLOAT: u32 = 1 << 0;
 
 /// A running meter on the default input device.
 pub struct InputMeter {
+    /// The device this meter was opened on. An IOProc is bound to one device
+    /// for life, so when the user switches microphone this is how the backend
+    /// notices it is metering the wrong one.
+    device: AudioObjectID,
     meter: IoProcMeter,
 }
 
@@ -59,7 +63,12 @@ impl InputMeter {
             // The overwhelmingly likely cause, and the one with a fix.
             format!("{e} \u{2014} microphone access may not be allowed")
         })?;
-        Ok(Self { meter })
+        Ok(Self { device, meter })
+    }
+
+    /// The device this meter is bound to.
+    pub fn device(&self) -> AudioObjectID {
+        self.device
     }
 
     /// Peak since the last call, in dBFS. `None` until the first block arrives.
