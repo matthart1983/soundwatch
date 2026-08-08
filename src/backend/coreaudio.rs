@@ -23,7 +23,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::ffi::{self, AudioObjectID, AudioObjectPropertyAddress, AudioStreamBasicDescription};
-use super::{AudioBackend, Levels, Metering, Pending};
+use super::{Audio, AudioBackend, Levels, Metering, Pending};
 use crate::model::{Caps, Device, Direction, Format, Snapshot, Stream, Timestamp};
 
 /// Incremented from the HAL's `kAudioDeviceProcessorOverload` callback, which
@@ -104,6 +104,11 @@ pub struct CoreAudio {
     /// Set at each tick when some process is playing to the default output.
     /// Corroborates a silent tap; see [`CoreAudio::output_meter_is_deaf`].
     output_is_busy: bool,
+    /// The default devices as of the last snapshot, so `audio()` can label a
+    /// window with the right sample rate without re-reading the HAL — every
+    /// property read is IPC, and this one runs twenty times a second.
+    last_out: Option<Device>,
+    last_in: Option<Device>,
 }
 
 /// How long a tap may read pure silence before that becomes suspicious. Long
@@ -152,6 +157,8 @@ impl CoreAudio {
             input,
             last_input_attempt: None,
             output_is_busy: false,
+            last_out: None,
+            last_in: None,
         }
     }
 
@@ -584,6 +591,9 @@ impl AudioBackend for CoreAudio {
         self.forget_stale(&streams);
         let xruns_60s = self.xruns_60s(now);
 
+        self.last_out = default_out.clone();
+        self.last_in = default_in.clone();
+
         // Corroboration for the silent-tap check: someone is actually playing.
         self.output_is_busy = default_out.as_ref().is_some_and(|d| {
             d.is_running && streams.iter().any(|s| !s.direction.is_input() && s.device_id == d.id)
@@ -599,6 +609,23 @@ impl AudioBackend for CoreAudio {
             caps: self.caps(),
             at: now,
         }
+    }
+
+    fn audio(&mut self, want: crate::spectrum::Source) -> Option<Audio> {
+        use crate::spectrum::Source;
+        let rate = |d: &Option<Device>| d.as_ref().map(|d| d.format.rate).unwrap_or(48_000);
+        let (samples, rate, overruns) = match want {
+            Source::Off => return None,
+            Source::Output => {
+                let t = self.tap.live()?;
+                (t.recent(crate::dsp::FFT_SIZE)?, rate(&self.last_out), t.overruns())
+            }
+            Source::Input => {
+                let m = self.input.live()?;
+                (m.recent(crate::dsp::FFT_SIZE)?, rate(&self.last_in), m.overruns())
+            }
+        };
+        Some(Audio { source: want, samples, rate, overruns })
     }
 
     fn levels(&mut self) -> Levels {

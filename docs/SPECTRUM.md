@@ -1,9 +1,27 @@
 # SPECTRUM.md — the spectrum analyser mode
 
-Status: **specification, not implemented.** Written against the code at
-`4081a6a`. Numbers here are exact and checkable; where a value is a judgement
-call the reasoning is given, so it can be overruled on purpose rather than by
-accident.
+Status: **implemented.** Written as a specification against `4081a6a` and built
+from it; this section records where the build departed from the plan, and why.
+Everything else below is what shipped.
+
+| planned | shipped |
+|---|---|
+| rows 3–18, a fixed 16-row graph | the graph fills whatever height the terminal has — the layout stopped being fixed while this was being built |
+| row 22 carries a band readout under a cursor | **not built.** There is no cursor, and adding one means a seventh key and a mode. The peak readout on row 2 answers the same question for the case that matters |
+| an explicit 50% hop between transforms | no hop. The analyser takes the most recent window from the ring each frame — about 41% overlap at 20 fps and 48 kHz, arrived at by the display rate rather than scheduled against it |
+| `Analysis` exposes the resolution limit | test-only. It pins the arithmetic behind "do not interpolate"; drawing a marker for it would be clutter |
+
+Two things the spec did not anticipate and the build added:
+
+* **Overrun reporting outranks every other verdict.** If the callback laps the
+  reader, the picture is of a signal that never existed, so the verdict line
+  says so before it says anything about hum or bandwidth.
+* **The audio only crosses the channel while the screen is open.** `s` tells the
+  backend thread what to collect; with the spectrum closed, nothing is sent.
+  A hundred kilobytes a second for a screen nobody is looking at is waste.
+
+The rest of this document is the specification as written, and is still the
+reference for the DSP constants and the detector thresholds.
 
 ---
 

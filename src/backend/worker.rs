@@ -23,17 +23,45 @@
 //! failure in this program already has.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::time::Instant;
 
-use super::{AudioBackend, Levels};
+use super::{Audio, AudioBackend, Levels};
 use crate::model::Snapshot;
+use crate::spectrum::Source;
 
 /// One message from the backend thread.
 pub enum Update {
     Snapshot(Box<Snapshot>),
     Levels(Levels),
+    Audio(Box<Audio>),
+}
+
+/// What the UI currently wants collected. Read by the backend thread every
+/// poll, so opening the spectrum takes effect on the next frame.
+#[derive(Clone, Default)]
+pub struct Wants(Arc<AtomicU8>);
+
+impl Wants {
+    pub fn set(&self, s: Source) {
+        self.0.store(
+            match s {
+                Source::Off => 0,
+                Source::Output => 1,
+                Source::Input => 2,
+            },
+            Ordering::Relaxed,
+        );
+    }
+
+    fn get(&self) -> Source {
+        match self.0.load(Ordering::Relaxed) {
+            1 => Source::Output,
+            2 => Source::Input,
+            _ => Source::Off,
+        }
+    }
 }
 
 /// Depth of the queue between the backend and the renderer.
@@ -47,6 +75,7 @@ const QUEUE_DEPTH: usize = 64;
 pub struct BackendWorker {
     rx: Receiver<Update>,
     stop: Arc<AtomicBool>,
+    wants: Wants,
 }
 
 impl BackendWorker {
@@ -55,6 +84,8 @@ impl BackendWorker {
         let (tx, rx) = sync_channel(QUEUE_DEPTH);
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
+        let wants = Wants::default();
+        let asked = wants.clone();
 
         let spawned = std::thread::Builder::new()
             .name("soundwatch-backend".into())
@@ -75,6 +106,13 @@ impl BackendWorker {
                     if !send(&tx, Update::Levels(backend.levels())) {
                         return;
                     }
+                    let want = asked.get();
+                    if want.is_on()
+                        && let Some(a) = backend.audio(want)
+                        && !send(&tx, Update::Audio(Box::new(a)))
+                    {
+                        return;
+                    }
                     if last_tick.elapsed() >= crate::app::TICK_INTERVAL {
                         last_tick = Instant::now();
                         if !send(&tx, Update::Snapshot(Box::new(backend.snapshot()))) {
@@ -88,7 +126,12 @@ impl BackendWorker {
         if !spawned {
             stop.store(true, Ordering::Relaxed);
         }
-        Self { rx, stop }
+        Self { rx, stop, wants }
+    }
+
+    /// Tell the backend which signal the spectrum screen wants, if any.
+    pub fn want_audio(&self, s: Source) {
+        self.wants.set(s);
     }
 
     /// Everything that has arrived since the last call. Never blocks.

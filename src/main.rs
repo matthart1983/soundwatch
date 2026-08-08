@@ -16,11 +16,13 @@
 mod app;
 mod backend;
 mod demo;
+mod dsp;
 mod fmt;
 mod grid;
 mod layout;
 mod meter;
 mod model;
+mod spectrum;
 mod tcc;
 mod theme;
 mod ui;
@@ -59,7 +61,7 @@ OPTIONS:
     --ascii           use ASCII stand-ins for the glyphs that are not reliably
                       single-width in every terminal
     --once <STATE>    render one frame to stdout and exit. STATE is one of
-                      main, paused, filter, detail, alert, help
+                      main, paused, filter, detail, alert, help, spectrum
     --no-color        with --once, emit plain text
     --probe-tap       start the output tap, watch it for five seconds, and
                       report whether real samples arrive. Use this first when
@@ -68,7 +70,7 @@ OPTIONS:
     -V, --version     print version
 
 KEYS:
-    q quit    p pause    / filter    enter detail    ? help
+    q quit    p pause    s spectrum    / filter    enter detail    ? help
     up/down (or j/k) move the selection    esc close detail or clear filter
 ";
 
@@ -348,6 +350,12 @@ fn render_once_at(
         "paused" => app.on_key(press(KeyCode::Char('p'))),
         "detail" => app.on_key(press(KeyCode::Enter)),
         "help" => app.on_key(press(KeyCode::Char('?'))),
+        "spectrum" => {
+            app.on_key(press(KeyCode::Char('s')));
+            if app.demo {
+                app.seed_demo_spectrum();
+            }
+        }
         "filter" => {
             app.on_key(press(KeyCode::Char('/')));
             for ch in "zoom".chars() {
@@ -447,7 +455,7 @@ mod tests {
 
     #[test]
     fn every_state_fits_the_grid() {
-        for state in ["main", "paused", "filter", "detail", "alert", "help"] {
+        for state in ["main", "paused", "filter", "detail", "alert", "help", "spectrum"] {
             assert_within_grid(&frame(state));
         }
     }
@@ -457,7 +465,7 @@ mod tests {
     #[test]
     fn every_state_fits_every_terminal_size() {
         for &(w, h) in SIZES {
-            for state in ["main", "paused", "filter", "detail", "alert", "help"] {
+            for state in ["main", "paused", "filter", "detail", "alert", "help", "spectrum"] {
                 assert_grid(&frame_at(state, w, h), w, h);
             }
         }
@@ -480,8 +488,8 @@ mod tests {
             let footer = f.last().expect("a footer");
             assert!(footer.contains("q quit"), "at {w}x{h}: {footer:?}");
             assert!(
-                footer.contains("soundwatch-lite"),
-                "version not pinned to the right edge at {w}x{h}: {footer:?}"
+                footer.contains(env!("CARGO_PKG_VERSION")),
+                "no version pinned to the right edge at {w}x{h}: {footer:?}"
             );
         }
     }
@@ -552,7 +560,13 @@ mod tests {
         assert!(f[spec().row_table_head as usize].contains("APP"));
         assert!(f[spec().row_table_head as usize].contains("60s"));
         assert!(f[spec().row_footer as usize].contains("q quit"));
-        assert!(f[spec().row_footer as usize].contains("soundwatch-lite"));
+        // At 80 columns six keys leave no room for the full name, so the
+        // version compresses to its number rather than a key being dropped.
+        assert!(f[spec().row_footer as usize].contains(env!("CARGO_PKG_VERSION")));
+        assert!(f[spec().row_footer as usize].contains("? help"), "a key was shed at 80 columns");
+        // With room, the full string comes back.
+        let wide = frame_at("main", 120, 24);
+        assert!(wide[spec().row_footer as usize].contains("soundwatch-lite"));
     }
 
     #[test]
@@ -601,6 +615,24 @@ mod tests {
         // Rows 19-21 are the detail block, so the list stops at 18. The block is
         // anchored by the tree corner at column 3.
         assert_eq!(f[19].find('\u{2514}'), Some(3), "corner glyph misplaced: {:?}", f[19]);
+    }
+
+    /// The spectrum screen has to render its graph, its axis and its verdict,
+    /// at every size, and it has to name the faults in the fixture.
+    #[test]
+    fn the_spectrum_screen_draws_and_names_what_it_finds() {
+        for &(w, h) in SIZES {
+            let f = frame_at("spectrum", w, h);
+            let joined = f.join("\n");
+            assert!(joined.contains("hann"), "no analysis label at {w}x{h}");
+            assert!(joined.contains("1k"), "no frequency axis at {w}x{h}");
+            assert!(joined.contains("50 Hz hum"), "the fixture's hum went unreported at {w}x{h}");
+            // The stream table belongs to the other screen.
+            assert!(!joined.contains("APP  "), "the table leaked into spectrum at {w}x{h}");
+            // And there are actual bars, not an empty frame.
+            let bars = f.iter().filter(|l| l.contains('\u{2588}')).count();
+            assert!(bars >= 4, "only {bars} rows of graph at {w}x{h}");
+        }
     }
 
     #[test]

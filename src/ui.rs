@@ -18,6 +18,8 @@ use crate::model::{Stream, Verdict};
 use crate::theme;
 
 pub const VERSION: &str = concat!("soundwatch-lite ", env!("CARGO_PKG_VERSION"));
+/// What the footer falls back to when the full string will not fit.
+pub const SHORT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub fn render(app: &App, buf: &mut Buffer, area: Rect) {
     if area.width < MIN_COLS || area.height < MIN_ROWS {
@@ -32,13 +34,21 @@ pub fn render(app: &App, buf: &mut Buffer, area: Rect) {
 
     c.clear(theme::BG);
     header(&mut c, &l, app);
-    meters(&mut c, &l, app);
-    axis(&mut c, &l, app);
-    vitals(&mut c, &l, app);
-    note(&mut c, &l, app);
-    table(&mut c, &l, app);
-    if app.mode == Mode::Detail {
-        detail(&mut c, &l, app);
+    if app.spectrum.source.is_on() {
+        // Spectrum replaces the meters, the axis, the vitals, the note and the
+        // table: the question has changed from *which app* to *what is in this
+        // signal*. The header and footer stay, so the machine's health is still
+        // visible while you stare at the graph.
+        spectrum(&mut c, &l, app);
+    } else {
+        meters(&mut c, &l, app);
+        axis(&mut c, &l, app);
+        vitals(&mut c, &l, app);
+        note(&mut c, &l, app);
+        table(&mut c, &l, app);
+        if app.mode == Mode::Detail {
+            detail(&mut c, &l, app);
+        }
     }
     prompt(&mut c, &l, app);
     footer(&mut c, &l, app);
@@ -545,19 +555,179 @@ fn footer(c: &mut Canvas, l: &Layout, app: &App) {
     let keys: &[(&str, &str)] = if app.mode == Mode::Filter {
         &[("\u{21B5}", "apply"), ("esc", "cancel")]
     } else {
-        &[("q", "quit"), ("p", "pause"), ("/", "filter"), ("\u{21B5}", "detail"), ("?", "help")]
+        &[
+            ("q", "quit"),
+            ("p", "pause"),
+            ("s", "spectrum"),
+            ("/", "filter"),
+            ("\u{21B5}", "detail"),
+            ("?", "help"),
+        ]
     };
+
+    // Six keys and the full version string overflow 80 columns by five, and
+    // the spec puts both on this row. The version is the compressible one — a
+    // bare number still answers "which build is this?" — so it sheds its name
+    // before any key is dropped. Keys are shed only if even that is not
+    // enough, from the right, where the least-used ones are.
+    let keys_w: u16 = keys.iter().map(|(k, v)| width(k) + 1 + width(v)).sum::<u16>()
+        + 3 * (keys.len() as u16 - 1);
+    let version = if keys_w + 2 + width(VERSION) <= l.content.width() {
+        Some(VERSION)
+    } else if keys_w + 2 + width(SHORT_VERSION) <= l.content.width() {
+        Some(SHORT_VERSION)
+    } else {
+        None
+    };
+    let field = match version {
+        Some(v) => l.content.ending_before(l.content.x1 + 2 - width(v), 2),
+        None => l.content,
+    };
+
     let mut x = l.content.x0;
-    let field = l.content.ending_before(l.content.x1 + 2 - width(VERSION), 2);
     for (i, (k, label)) in keys.iter().enumerate() {
+        let key = if *k == "\u{21B5}" { c.g.enter } else { k };
+        let need = width(key) + 1 + width(label) + if i > 0 { 3 } else { 0 };
+        if x + need > field.x1 + 1 {
+            break;
+        }
         if i > 0 {
             x += 3;
         }
-        let key = if *k == "\u{21B5}" { c.g.enter } else { k };
         x = c.text(field, x, l.row_footer, key, theme::CYAN, true);
         x = c.text(field, x, l.row_footer, &format!(" {label}"), theme::DIM, false);
     }
-    c.right(l.content, l.row_footer, VERSION, theme::FAINT);
+    if let Some(v) = version {
+        c.right(l.content, l.row_footer, v, theme::FAINT);
+    }
+}
+
+// ── the spectrum screen ──────────────────────────────────────────────────────
+
+fn spectrum(c: &mut Canvas, l: &Layout, app: &App) {
+    let sp = &app.spectrum;
+    let base = match sp.source {
+        crate::spectrum::Source::Input => theme::CYAN,
+        _ => theme::GREEN,
+    };
+    let glyph = if sp.source == crate::spectrum::Source::Input { c.g.inp } else { c.g.out };
+    let (top, rows) = l.spectrum();
+
+    // ── the label row ───────────────────────────────────────────────────────
+    let arrow_fg = if app.paused { theme::FAINT } else { base };
+    let mut x = c.text(l.content, 1, l.row_out_label, glyph, arrow_fg, true);
+    x = c.text(l.content, x + 1, l.row_out_label, sp.source.label(), theme::FG, true);
+
+    let rate = sp.analysis().map(|a| a.rate).unwrap_or(0);
+    let detail = if rate > 0 {
+        format!(
+            "   {}pt hann   {:.1} Hz/bin",
+            crate::dsp::FFT_SIZE,
+            rate as f32 / crate::dsp::FFT_SIZE as f32
+        )
+    } else {
+        "   waiting for audio".into()
+    };
+    c.text(l.content, x, l.row_out_label, &detail, theme::DIM, false);
+
+    // The peak readout is the elastic element: dropped whole rather than
+    // truncated, because a truncated frequency is a wrong frequency.
+    if let Some((hz, db)) = sp.peak() {
+        let text = if hz >= 1000.0 {
+            format!("peak {:.2} kHz  {}", hz / 1000.0, fmt::dbfs(db))
+        } else {
+            format!("peak {hz:.0} Hz  {}", fmt::dbfs(db))
+        };
+        let right = Field::new(x + width(&detail) + 2, l.content.x1);
+        if right.width() >= width(&text) {
+            c.right(right, l.row_out_label, &text, theme::DIM);
+        }
+    }
+
+    // ── the graph ───────────────────────────────────────────────────────────
+    let cols = sp.columns();
+    if cols.is_empty() {
+        for cx in l.content.x0..=l.content.x1 {
+            c.set(cx, top + rows - 1, c.g.blocks[0], theme::FAINT);
+        }
+    } else {
+        let blocks = c.g.blocks;
+        for (i, col) in cols.iter().enumerate().take(l.content.width() as usize) {
+            let cx = l.content.x0 + i as u16;
+            let fg = if app.paused { theme::FAINT } else { theme::level(col.level, base) };
+            for (j, cell) in spectrum_column(col.level, rows, &blocks).into_iter().enumerate() {
+                if let Some(ch) = cell {
+                    c.set(cx, top + rows - 1 - j as u16, ch, fg);
+                }
+            }
+            // The peak-hold cap, drawn above the live bar so held transients
+            // stay readable after the bar has fallen away from them.
+            if col.hold > col.level + 1.0 {
+                let h = (crate::spectrum::norm(col.hold) * rows as f32).round() as u16;
+                if h > 0 && h <= rows {
+                    c.set(cx, top + rows - h, blocks[0], theme::FAINT);
+                }
+            }
+        }
+    }
+
+    // ── the frequency axis ──────────────────────────────────────────────────
+    let arow = l.row_spectrum_axis();
+    c.rule(l.content, arow, theme::FAINT);
+    if rate > 0 {
+        let axis = crate::spectrum::Axis::new(l.content.width(), rate as f32 / 2.0);
+        for (hz, label) in [(100.0f32, "100"), (1000.0, "1k"), (10_000.0, "10k")] {
+            if let Some(col) = axis.column_of(hz) {
+                let cx = l.content.x0 + col;
+                let half = width(label) / 2;
+                let start = cx.saturating_sub(half).max(l.content.x0);
+                c.text(l.content, start, arow, label, theme::DIM, false);
+            }
+        }
+        c.text(l.content, l.content.x0, arow, "20", theme::DIM, false);
+    }
+
+    // ── the verdict ─────────────────────────────────────────────────────────
+    let vrow = l.row_spectrum_verdict();
+    if let Some(v) = sp.verdict() {
+        c.left(l.content, vrow, &v, theme::RED);
+    } else if let Some(stall) = app.backend_stall() {
+        c.left(l.content, vrow, stall, theme::FAINT);
+    } else if !sp.has_data() {
+        let msg = match sp.source {
+            crate::spectrum::Source::Input if !app.snap.caps.input_levels => {
+                "input is not metered \u{2014} restart with --meter-input"
+            }
+            crate::spectrum::Source::Output if !app.snap.caps.device_levels => {
+                "output is not metered \u{2014} run --probe-tap to find out why"
+            }
+            _ => "waiting for audio\u{2026}",
+        };
+        c.left(l.content, vrow, msg, theme::FAINT);
+    } else {
+        c.left(l.content, vrow, "no faults in this signal", theme::FAINT);
+    }
+}
+
+/// One spectrum column, bottom row first. Same block-glyph scheme as the
+/// meters, on the spectrum's own floor rather than the meters'.
+fn spectrum_column(dbfs: f32, height: u16, blocks: &[char; 8]) -> Vec<Option<char>> {
+    let h = height as usize;
+    let subs = (crate::spectrum::norm(dbfs) * h as f32 * 8.0).round() as usize;
+    let full = subs / 8;
+    let rem = subs % 8;
+    let mut out = vec![None; h];
+    for (i, cell) in out.iter_mut().enumerate() {
+        if i < full {
+            *cell = Some(blocks[7]);
+        } else if i == full && rem > 0 {
+            *cell = Some(blocks[rem - 1]);
+        }
+    }
+    if subs == 0 && h > 0 {
+        out[0] = Some(blocks[0]);
+    }
+    out
 }
 
 // ── the help overlay ─────────────────────────────────────────────────────────
@@ -583,6 +753,7 @@ fn help(c: &mut Canvas, l: &Layout, app: &App) {
     let keys: &[(&str, &str)] = &[
         ("q", "quit"),
         ("p", "pause \u{2014} freezes the meters and peak holds"),
+        ("s", "spectrum \u{2014} cycles output, input, off"),
         ("/", "filter by app or device name"),
         (c.g.enter, "expand the selected stream"),
         (c.g.updown, "move the selection (j and k also work)"),

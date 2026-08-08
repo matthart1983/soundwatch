@@ -19,6 +19,18 @@ pub struct Levels {
     pub in_dbfs: Option<f32>,
 }
 
+/// A window of mono audio for the spectrum screen, and where it came from.
+#[derive(Clone, Debug)]
+pub struct Audio {
+    pub source: crate::spectrum::Source,
+    pub samples: Vec<f32>,
+    pub rate: u32,
+    /// Windows the analyser lost because the callback lapped the reader.
+    /// Reported rather than hidden: a spectrum drawn from torn audio would be
+    /// a picture of a signal that never existed.
+    pub overruns: u64,
+}
+
 /// Which meters a backend should actually attempt to open.
 ///
 /// Metering is the one thing this tool does that is not pure observation, so it
@@ -124,6 +136,16 @@ pub trait AudioBackend: Send {
     /// Level sample. Called at the meter rate. Returns `None` for any meter
     /// that is not live — not yet open, unavailable, or never asked for.
     fn levels(&mut self) -> Levels;
+
+    /// A window of audio for the spectrum, when one is being asked for.
+    ///
+    /// Separate from `levels` because it is only collected while the spectrum
+    /// screen is open: a hundred kilobytes a second crossing a channel for a
+    /// screen nobody is looking at is waste, and the ring in the IOProc is
+    /// there whether anyone reads it or not.
+    fn audio(&mut self, _want: crate::spectrum::Source) -> Option<Audio> {
+        None
+    }
 }
 
 #[cfg(test)]

@@ -76,6 +76,16 @@ impl InputMeter {
         self.meter.peak_dbfs()
     }
 
+    /// Windows the spectrum reader lost to the callback lapping it.
+    pub fn overruns(&self) -> u64 {
+        self.meter.overruns()
+    }
+
+    /// The most recent `n` samples of the mono mixdown, for the spectrum.
+    pub fn recent(&self, n: usize) -> Option<Vec<f32>> {
+        self.meter.recent(n)
+    }
+
     /// Has any sample, ever, been non-zero? Microphone consent fails the same
     /// quiet way audio-capture consent does: zeros, not an error.
     pub fn has_ever_heard_signal(&self) -> bool {

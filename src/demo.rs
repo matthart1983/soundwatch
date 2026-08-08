@@ -167,6 +167,51 @@ pub fn in_series() -> Vec<f32> {
     levels(23, FIXTURE_COLS, -30.0, 12.0, -70.0)
 }
 
+/// A synthetic signal with every fault the spectrum screen can name.
+///
+/// Pink-ish tilt, a 1 kHz tone, 50 Hz hum well above the floor, and a brick
+/// wall at 15.7 kHz — one fixture that exercises the transform, the axis, the
+/// ballistics and all three detectors, with no audio device anywhere.
+pub fn spectrum_signal() -> Vec<f32> {
+    let n = crate::dsp::FFT_SIZE;
+    let rate = 48_000.0f32;
+    let mut out = vec![0.0f32; n];
+    let tau = std::f32::consts::TAU;
+
+    // Band-limited noise, built from tones so it stays deterministic.
+    let mut seed = 20260808u64;
+    // Starts above the hum so the fixture's 50 Hz tone is isolated, the way a
+    // real ground loop is. Noise tones sitting inside the same few bins would
+    // skew the interpolated peak and make the readout disagree with the
+    // verdict, which reads as a bug even when both are within tolerance.
+    let mut f = 70.0f32;
+    while f < 15_700.0 {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        let phase = (seed >> 33) as f32 / (1u64 << 31) as f32 * tau;
+        // Tilt: -3 dB per octave, so it reads like real material.
+        let amp = 0.02 * (200.0 / f).sqrt();
+        for (i, v) in out.iter_mut().enumerate() {
+            *v += amp * (tau * f * i as f32 / rate + phase).sin();
+        }
+        f *= 1.06;
+    }
+    for (i, v) in out.iter_mut().enumerate() {
+        let t = i as f32 / rate;
+        *v += 0.25 * (tau * 1000.0 * t).sin();
+        *v += 0.35 * (tau * 50.0 * t).sin();
+    }
+    // Normalise to a realistic -6 dBFS peak. Summed tones otherwise pile up
+    // well past full scale and the whole graph reads as a solid block.
+    let peak = out.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+    if peak > 0.0 {
+        let g = 0.5 / peak;
+        for v in out.iter_mut() {
+            *v *= g;
+        }
+    }
+    out
+}
+
 fn device(id: u32, name: &str, direction: Direction) -> Device {
     Device {
         id,

@@ -1,6 +1,7 @@
 # SoundWatch Lite
 
-A read-only audio diagnostics TUI. One screen at 80×24, five keys, four colours.
+A read-only audio diagnostics TUI. One screen, six keys, four colours — 80×24
+is the minimum, and it fills whatever terminal you give it.
 
 Fourth member of the Lite family after NetWatch Lite, SysWatch Lite and DiskWatch
 Lite, and built to the `design_handoff_soundwatch` spec. It answers one question:
@@ -46,21 +47,70 @@ cargo run -- --demo   # the design fixtures — touches no audio device at all
 | `--demo` | drive the UI from the handoff's deterministic fixtures; opens nothing |
 | `--meter-input` | also meter the default input device (see [Input](#input-is-opt-in)) |
 | `--ascii` | ASCII stand-ins for glyphs that are not reliably single-width |
-| `--once <state>` | render `main`, `paused`, `filter`, `detail`, `alert` or `help` and exit |
+| `--once <state>` | render `main`, `paused`, `filter`, `detail`, `alert`, `help` or `spectrum` and exit |
 | `--no-color` | with `--once`, emit plain text |
 | `--probe-tap` | start the tap, watch it for five seconds, report what arrived |
 
+## The spectrum screen
+
+`s` cycles the main screen through **off → output → input → off**. It replaces
+the meters and the stream table, because the question has changed from *which
+app* to *what is in this signal*.
+
+```
+ ⯈ output   4096pt hann   11.7 Hz/bin                        peak 641 Hz  -18.2
+                                              ▁▁
+                                          ▁▁ ▁  ▁         ▁
+                            ▁▁▁▁▁▁ ▁           ▇      ▁      ▁
+ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▂▂▁▁▁▁██████████████████▅██████▃▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+ 20───────────────100─────────────────────1k──────────────────────10k──────────
+ 50 Hz hum, 22 dB above the noise floor · check grounding and cable runs
+```
+
+That last line is the point. A spectrum display that does not **name** what it
+is showing is a screensaver, and these are faults the meters cannot see because
+the *level* is perfectly fine:
+
+| it says | it means |
+|---|---|
+| `50 Hz hum, 22 dB above the noise floor` | a ground loop — check your cable runs |
+| `content stops at 15.7 kHz` | a lossy source, or a Bluetooth codec quietly throwing away the top octave |
+| `DC offset on this path` | something is eating your headroom |
+| `the analyser is dropping audio` | the picture is behind the signal; do not trust it |
+
+Each needs three seconds of agreement before it will say anything, for the same
+reason one xrun does not paint the screen red.
+
+The axis is logarithmic from 20 Hz to Nyquist, because pitch is and because a
+linear axis spends half its width on 12–24 kHz where nothing diagnostic ever
+happens. Below about 122 Hz the axis is finer than the transform, so the graph
+stair-steps — that is drawn honestly rather than smoothed into detail the FFT
+never had. Above it, each column takes the **maximum** of the bins it covers:
+averaging would hide the narrow peaks the screen exists to find.
+
+The transform is a hand-rolled radix-2 FFT (`src/dsp.rs`), for the same reason
+the CoreAudio bindings are hand-rolled — not speed, which is irrelevant at
+twenty-three transforms a second, but keeping the dependency tree at four
+crates. Its accuracy is pinned by tests: a full-scale sine must read 0.0 dBFS,
+energy must be conserved, and 50 Hz must be distinguishable from 60 Hz — which
+it is not by bin index at this resolution, only by interpolating the peak.
+
+`docs/SPECTRUM.md` is the specification, with the constants, the detector
+thresholds and the reasoning behind each.
+
 ## Keys
 
-`q` quit · `p` pause · `/` filter · `↵` detail · `?` help · `↑↓` (or `j`/`k`)
-move the selection · `esc` close detail or clear the filter.
+`q` quit · `p` pause · `s` spectrum · `/` filter · `↵` detail · `?` help ·
+`↑↓` (or `j`/`k`) move the selection · `esc` close the spectrum, close detail,
+or clear the filter.
 
 ## Read-only, by construction
 
 No volume, mute, routing or default changes. Nothing is ever written back to the
 audio system. Levels are observed, never recorded: no sample leaves the IOProc,
 nothing is written to disk, and the only state crossing out of the real-time
-thread is a single atomic peak.
+thread is an atomic peak and, while the spectrum screen is open, a ring of
+recent samples that never leaves the process.
 
 ## Consent, and why there is a Makefile
 
@@ -221,6 +271,17 @@ arrow only, so a 24→16 truncation at the same rate rendered as unremarkable di
 text — despite the full tool calling it out with `insight_bit_depth_downgrade`.
 The column now shows `24→16` for that case.
 
+**A sixth key.** `s` opens the spectrum. The handoff specifies five keys, and
+this is the same trade as `?` and `↑↓`: the alternative is a screen that cannot
+be reached. At 80 columns six keys and the full version string overflow the
+footer by five, so the version compresses to its number rather than a key being
+dropped — the keys are functional and the version is decoration.
+
+**80×24 is a floor, not a frame.** The handoff fixes the grid and says nothing
+about other sizes; the first build letterboxed, which wasted most of a
+full-screen terminal and kept the meters small exactly where there was room to
+make them large. See [Layout](#layout).
+
 **The spec forgot some screens.** `?` is in the footer and in the five keys, and
 the README promises "an overlay that returns to the same screen", but no document
 says what it contains. There was also no key to move the selection — with eight
@@ -261,8 +322,14 @@ rows 6-8  input       row 11  degradation    row 22  filter / range
 
 Table columns, identical across all four Lites: `1 / 17 / 40 / 51 / 62 / 70`.
 
-Terminals larger than 80×24 letterbox the canvas centred; smaller ones get an
-explicit message rather than a mangled layout.
+80×24 is the **minimum**, not the size. The layout is computed from the
+terminal: a third of surplus height goes to the meters in the spec's 3:2 ratio
+and the rest to the stream list, and surplus width goes to DEVICE and APP (the
+two fields real device names actually overflow) and to the sparkline. Every
+number above is reproduced exactly at 80×24, which the tests assert — a
+generalisation that does not pass through the spec's own values is a different
+design wearing the same name. Smaller terminals get an explicit message rather
+than a mangled layout.
 
 ## Modules
 
@@ -273,6 +340,10 @@ explicit message rather than a mangled layout.
 | `meter.rs` | dB-space normalisation, block meters, sparklines, the 60s history ring |
 | `model.rs` | data model, `Caps`, and the alert rules |
 | `tcc.rs` | becoming our own TCC subject, so consent can be asked for at all |
+| `layout.rs` | every row and column, for whatever size the terminal is |
+| `dsp.rs` | the FFT, the Hann window, and the normalisation that is usually wrong |
+| `spectrum.rs` | log frequency mapping, analyser ballistics, and the fault detectors |
+| `backend/worker.rs` | the backend on its own thread, so a stalled HAL cannot freeze the UI |
 | `backend/ioproc.rs` | the real-time peak callback both meters attach through |
 | `backend/tap.rs` | the output process tap and its private aggregate device |
 | `backend/input.rs` | the opt-in capture stream behind the input meter |

@@ -10,6 +10,7 @@ use crate::grid::{ASCII, Glyphs, UNICODE};
 use crate::layout::Layout;
 use crate::meter::{self, History};
 use crate::model::{Snapshot, Stream, Verdict, verdict};
+use crate::spectrum::{Source, Spectrum};
 
 /// Meter sampling rate. The full tool meters at 60 Hz; Lite's chart advances one
 /// column every 769ms, so 20 Hz is four times the resolution the display can
@@ -64,6 +65,8 @@ pub struct App {
     /// rather than recomputed in the renderer because the selection has to be
     /// clamped against the list height, and that is not a rendering concern.
     pub layout: Layout,
+    /// The spectrum screen. Off by default; `s` cycles it.
+    pub spectrum: Spectrum,
     pub demo: bool,
     pub should_quit: bool,
     last_tick: Instant,
@@ -71,6 +74,8 @@ pub struct App {
     /// When the app started, and whether the backend has ever answered.
     started: Instant,
     heard_from_backend: bool,
+    /// Whether audio reached the analyser since the last `sample()`.
+    spectrum_fed: bool,
     demo_xruns: u32,
 }
 
@@ -109,12 +114,14 @@ impl App {
             stream_hist: HashMap::new(),
             glyphs: if ascii { ASCII } else { UNICODE },
             layout: Layout::new(crate::grid::MIN_COLS, crate::grid::MIN_ROWS),
+            spectrum: Spectrum::default(),
             demo,
             should_quit: false,
             last_tick: Instant::now(),
             last_commit: Instant::now(),
             started: Instant::now(),
             heard_from_backend: false,
+            spectrum_fed: false,
             demo_xruns: 0,
         };
         if demo {
@@ -122,6 +129,20 @@ impl App {
         }
         app.recompute_verdict();
         app
+    }
+
+    /// Drive the spectrum from a synthetic signal, so `--demo` exercises the
+    /// transform, the log axis, the ballistics *and* all three detectors on a
+    /// machine with no audio consent — and so CI can render the screen.
+    pub fn seed_demo_spectrum(&mut self) {
+        let sig = crate::demo::spectrum_signal();
+        let w = self.layout.content.width();
+        // Enough frames to satisfy the detectors' sustain rule.
+        let frames = (crate::spectrum::SUSTAIN_SECS / SAMPLE_INTERVAL.as_secs_f32()) as usize + 2;
+        for _ in 0..frames {
+            self.spectrum.push(&sig, 48_000, w, SAMPLE_INTERVAL.as_secs_f32());
+        }
+        self.spectrum_fed = true;
     }
 
     fn seed_demo(&mut self) {
@@ -162,6 +183,19 @@ impl App {
         let mut snapped = false;
         for u in updates {
             match u {
+                Update::Audio(a) => {
+                    if self.spectrum.source == a.source {
+                        let w = self.layout.content.width();
+                        self.spectrum.push_with_overruns(
+                            &a.samples,
+                            a.rate,
+                            w,
+                            SAMPLE_INTERVAL.as_secs_f32(),
+                            a.overruns,
+                        );
+                        self.spectrum_fed = true;
+                    }
+                }
                 Update::Levels(l) => {
                     if let Some(d) = l.out_dbfs {
                         self.out_hist.push_sample(d);
@@ -197,6 +231,13 @@ impl App {
         if self.paused {
             return;
         }
+        // A source that stops delivering must fall away rather than freeze
+        // mid-air. Only when nothing arrived this frame: `push` already
+        // advanced the ballistics for the frames that did.
+        if self.spectrum.source.is_on() && !self.spectrum_fed {
+            self.spectrum.idle(SAMPLE_INTERVAL.as_secs_f32());
+        }
+        self.spectrum_fed = false;
         if self.last_commit.elapsed().as_secs_f32() >= meter::BUCKET_SECS {
             self.last_commit = Instant::now();
             if !self.demo {
@@ -353,6 +394,15 @@ impl App {
                 self.should_quit = true
             }
             KeyCode::Char('p') => self.paused = !self.paused,
+            KeyCode::Char('s') => {
+                self.spectrum.cycle_source();
+                // Tell the backend to start (or stop) collecting audio. It is
+                // only shipped across the channel while this screen is open.
+                if let Some(w) = &self.worker {
+                    w.want_audio(self.spectrum.source);
+                }
+                self.clamp_selection();
+            }
             KeyCode::Char('/') => {
                 self.query = self.applied.clone().unwrap_or_default();
                 self.mode = Mode::Filter;
@@ -366,7 +416,13 @@ impl App {
                 self.clamp_selection();
             }
             KeyCode::Esc => {
-                if self.mode == Mode::Detail {
+                if self.spectrum.source.is_on() {
+                    self.spectrum.source = Source::Off;
+                    self.spectrum.reset();
+                    if let Some(w) = &self.worker {
+                        w.want_audio(Source::Off);
+                    }
+                } else if self.mode == Mode::Detail {
                     self.mode = Mode::Main;
                 } else if self.applied.is_some() {
                     self.applied = None;

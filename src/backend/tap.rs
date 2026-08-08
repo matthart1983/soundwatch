@@ -263,6 +263,16 @@ impl LevelTap {
     pub fn peak_dbfs(&self) -> Option<f32> {
         self.meter.as_ref()?.peak_dbfs()
     }
+
+    /// Windows the spectrum reader lost to the callback lapping it.
+    pub fn overruns(&self) -> u64 {
+        self.meter.as_ref().map(IoProcMeter::overruns).unwrap_or(0)
+    }
+
+    /// The most recent `n` samples of the mono mixdown, for the spectrum.
+    pub fn recent(&self, n: usize) -> Option<Vec<f32>> {
+        self.meter.as_ref()?.recent(n)
+    }
 }
 
 impl Drop for LevelTap {
