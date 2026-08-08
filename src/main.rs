@@ -15,6 +15,7 @@
 
 mod app;
 mod backend;
+mod chart;
 mod demo;
 mod dsp;
 mod fmt;
@@ -58,8 +59,13 @@ OPTIONS:
     --meter-input     also meter the default input device. Off by default: it
                       opens a capture stream, so this tool then shows up in the
                       mic-in-use audit it is here to report.
+    --theme <NAME>    spec (default) or btop. btop colours every bar as a
+                      vertical gradient and draws charts in braille for twice
+                      the horizontal resolution; spec keeps the handoff's four
+                      colours, where a bar's colour means something.
     --ascii           use ASCII stand-ins for the glyphs that are not reliably
-                      single-width in every terminal
+                      single-width in every terminal. Forces blocks over
+                      braille, whatever the theme asks for.
     --once <STATE>    render one frame to stdout and exit. STATE is one of
                       main, paused, filter, detail, alert, help, spectrum
     --no-color        with --once, emit plain text
@@ -81,6 +87,7 @@ struct Args {
     color: bool,
     probe: bool,
     meter_input: bool,
+    theme: theme::Theme,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -91,12 +98,18 @@ fn parse_args() -> Result<Args, String> {
         color: true,
         probe: false,
         meter_input: false,
+        theme: theme::Theme::default(),
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--probe-tap" => a.probe = true,
             "--meter-input" => a.meter_input = true,
+            "--theme" => {
+                let name = it.next().ok_or("--theme needs a name")?;
+                a.theme = theme::Theme::parse(&name)
+                    .ok_or_else(|| format!("unknown theme: {name} (try spec or btop)"))?;
+            }
             "--demo" => a.demo = true,
             "--ascii" => a.ascii = true,
             "--no-color" => a.color = false,
@@ -148,7 +161,7 @@ fn main() {
     // --demo drives the fixtures and must not open, tap or even enumerate a
     // real device: it is the state you fall back to when consent is refused.
     if args.demo {
-        let mut app = App::demo(args.ascii);
+        let mut app = App::demo(args.ascii, args.theme);
         if let Some(state) = args.once {
             return once(&mut app, &state, args.color);
         }
@@ -166,7 +179,7 @@ fn main() {
     // is no UI to keep responsive and no second frame to wait for.
     if let Some(state) = args.once {
         let mut be = CoreAudio::new(metering);
-        let mut app = App::snapshot_only(be.snapshot(), args.ascii);
+        let mut app = App::snapshot_only(be.snapshot(), args.ascii, args.theme);
         return once(&mut app, &state, args.color);
     }
 
@@ -175,8 +188,13 @@ fn main() {
     let be = CoreAudio::new(metering);
     let name = be.name();
     let host = backend::ffi::hostname();
-    let mut app =
-        App::live(backend::worker::BackendWorker::spawn(Box::new(be)), name, host, args.ascii);
+    let mut app = App::live(
+        backend::worker::BackendWorker::spawn(Box::new(be)),
+        name,
+        host,
+        args.ascii,
+        args.theme,
+    );
 
     if let Err(e) = run(&mut app) {
         eprintln!("soundwatch-lite: {e}");
@@ -423,7 +441,11 @@ mod tests {
     }
 
     fn frame_at(state: &str, w: u16, h: u16) -> Vec<String> {
-        let mut app = App::demo(false);
+        frame_themed(state, w, h, theme::Theme::default())
+    }
+
+    fn frame_themed(state: &str, w: u16, h: u16, th: theme::Theme) -> Vec<String> {
+        let mut app = App::demo(false, th);
         let s = render_once_at(&mut app, state, false, w, h).expect("render");
         s.lines().map(str::to_owned).collect()
     }
@@ -497,7 +519,7 @@ mod tests {
     /// A crowded list, which is the normal case on a desktop and the one the
     /// eight-row fixture never exercises.
     fn crowded_frame_at(w: u16, h: u16) -> Vec<String> {
-        let mut app = App::demo(false);
+        let mut app = App::demo(false, theme::Theme::default());
         let template = app.snap.streams[0].clone();
         for i in 0..40 {
             let mut s = template.clone();
@@ -633,6 +655,39 @@ mod tests {
             let bars = f.iter().filter(|l| l.contains('\u{2588}')).count();
             assert!(bars >= 4, "only {bars} rows of graph at {w}x{h}");
         }
+    }
+
+    /// The btop theme has to reach the screen, not just the argument parser.
+    /// `--theme btop` was accepted and silently ignored in the live TUI for a
+    /// commit, because the theme was a field poked after construction and one
+    /// of three assignments did not survive a reformat.
+    #[test]
+    fn the_btop_theme_actually_changes_what_is_drawn() {
+        for state in ["main", "spectrum"] {
+            let spec = frame_themed(state, 120, 40, theme::Theme::Spec).join("\n");
+            let btop = frame_themed(state, 120, 40, theme::Theme::Btop).join("\n");
+            assert_ne!(spec, btop, "{state}: the theme changed nothing");
+            assert!(
+                btop.chars().any(|c| ('\u{2800}'..'\u{2900}').contains(&c)),
+                "{state}: the btop theme drew no braille"
+            );
+            assert!(
+                !spec.chars().any(|c| ('\u{2800}'..'\u{2900}').contains(&c)),
+                "{state}: the spec theme drew braille"
+            );
+        }
+    }
+
+    /// --ascii exists for terminals whose glyph coverage cannot be trusted,
+    /// and braille is a far riskier bet than the block elements.
+    #[test]
+    fn ascii_overrides_the_braille_theme() {
+        let mut app = App::demo(true, theme::Theme::Btop);
+        let s = render_once_at(&mut app, "spectrum", false, 120, 40).expect("render");
+        assert!(
+            !s.chars().any(|c| ('\u{2800}'..'\u{2900}').contains(&c)),
+            "--ascii still drew braille"
+        );
     }
 
     #[test]

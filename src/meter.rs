@@ -49,27 +49,6 @@ pub fn norm(dbfs: f32) -> f32 {
     ((dbfs - FLOOR_DBFS) / -FLOOR_DBFS).clamp(0.0, 1.0)
 }
 
-/// One meter column, bottom row first. `None` is an unpainted cell.
-pub fn column(dbfs: f32, height: u16, blocks: &[char; 8]) -> Vec<Option<char>> {
-    let h = height as usize;
-    let subs = (norm(dbfs) * h as f32 * 8.0).round() as usize;
-    let full = subs / 8;
-    let rem = subs % 8;
-    let mut out = vec![None; h];
-    for (i, cell) in out.iter_mut().enumerate() {
-        if i < full {
-            *cell = Some(blocks[7]);
-        } else if i == full && rem > 0 {
-            *cell = Some(blocks[rem - 1]);
-        }
-    }
-    // A signal sitting at the floor is still a signal: draw the baseline.
-    if subs == 0 && h > 0 {
-        out[0] = Some(blocks[0]);
-    }
-    out
-}
-
 /// One sparkline cell.
 pub fn spark(dbfs: f32, blocks: &[char; 8]) -> char {
     let idx = (norm(dbfs) * 7.0).round().clamp(0.0, 7.0) as usize;
@@ -201,7 +180,6 @@ impl History {
 #[cfg(test)]
 mod tests {
     use super::*;
-    const B: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
     #[test]
     fn normalisation_is_in_db_space() {
@@ -211,26 +189,6 @@ mod tests {
         // Below the floor and above full scale both clamp.
         assert_eq!(norm(-90.0), 0.0);
         assert_eq!(norm(6.0), 1.0);
-    }
-
-    #[test]
-    fn full_scale_fills_every_row() {
-        let c = column(0.0, 3, &B);
-        assert_eq!(c, vec![Some('█'), Some('█'), Some('█')]);
-    }
-
-    #[test]
-    fn floor_draws_a_baseline_not_a_void() {
-        // The spec's algorithm yields all-None here; the sparkline yields '▁'.
-        // Both now agree on the baseline.
-        assert_eq!(column(-60.0, 3, &B), vec![Some('▁'), None, None]);
-        assert_eq!(spark(-60.0, &B), '▁');
-    }
-
-    #[test]
-    fn partial_levels_use_the_right_sub_block() {
-        // -30 dBFS on a 3-row meter: norm 0.5 -> 12 subs -> 1 full + 4 rem.
-        assert_eq!(column(-30.0, 3, &B), vec![Some('█'), Some('▄'), None]);
     }
 
     #[test]

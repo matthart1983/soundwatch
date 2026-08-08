@@ -46,6 +46,7 @@ cargo run -- --demo   # the design fixtures — touches no audio device at all
 |---|---|
 | `--demo` | drive the UI from the handoff's deterministic fixtures; opens nothing |
 | `--meter-input` | also meter the default input device (see [Input](#input-is-opt-in)) |
+| `--theme <name>` | `spec` (default) or `btop` — see [Themes](#themes) |
 | `--ascii` | ASCII stand-ins for glyphs that are not reliably single-width |
 | `--once <state>` | render `main`, `paused`, `filter`, `detail`, `alert`, `help` or `spectrum` and exit |
 | `--no-color` | with `--once`, emit plain text |
@@ -97,6 +98,40 @@ it is not by bin index at this resolution, only by interpolating the peak.
 
 `docs/SPECTRUM.md` is the specification, with the constants, the detector
 thresholds and the reasoning behind each.
+
+## Themes
+
+`--theme btop` colours every bar as a vertical gradient — the direction colour
+at the floor, through yellow and orange to red at the top — and draws charts in
+braille, which packs two bars into each cell for twice the horizontal
+resolution.
+
+```
+spec                                    btop
+ ▁▂▃▄▅▆▇█  one colour per column         ⣀⣠⣤⣶⣿  two bars per cell,
+           meaning: green until                shaded by height
+           yellow at -6 dBFS, red
+           at 0 dBFS
+```
+
+It is **opt-in, and it costs something.** The palette's central rule is that
+red means the audio is wrong right now and nothing decorative is ever red; a
+height gradient paints red for height alone, so under this theme a red-tipped
+bar no longer *means* anything, it is just tall. In exchange, level becomes
+legible as colour at a glance across a wide screen, which a single flat colour
+is not. The help overlay's legend changes with the theme, because a legend that
+explained the spec's colours under the btop theme would be a lie on the one
+screen whose job is to explain the screen. Text, headers and verdicts keep the
+reserved colours either way, so the things that are genuinely wrong still
+announce themselves.
+
+Braille is not simply higher resolution — it trades **half the vertical steps
+for twice the horizontal**: 4 sub-rows per cell against the block elements' 8,
+and 2 bars per cell against 1. That is a good trade for a spectrum, where
+horizontal is frequency resolution, and a poor one for a three-row meter, which
+is one more reason it is not the default. `--ascii` forces blocks whatever the
+theme asks for: that flag exists for terminals whose glyph coverage cannot be
+trusted, and braille is a far riskier bet than `▁▂▃`.
 
 ## Keys
 
@@ -343,6 +378,7 @@ than a mangled layout.
 | `layout.rs` | every row and column, for whatever size the terminal is |
 | `dsp.rs` | the FFT, the Hann window, and the normalisation that is usually wrong |
 | `spectrum.rs` | log frequency mapping, analyser ballistics, and the fault detectors |
+| `chart.rs` | bar charts in blocks or braille, shared by the meters and the spectrum |
 | `backend/worker.rs` | the backend on its own thread, so a stalled HAL cannot freeze the UI |
 | `backend/ioproc.rs` | the real-time peak callback both meters attach through |
 | `backend/tap.rs` | the output process tap and its private aggregate device |

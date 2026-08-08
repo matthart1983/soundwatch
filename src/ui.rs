@@ -10,6 +10,7 @@ use ratatui::layout::Rect;
 use ratatui::style::Color;
 
 use crate::app::{App, Mode};
+use crate::chart;
 use crate::fmt;
 use crate::grid::{Canvas, Field, MIN_COLS, MIN_ROWS, width};
 use crate::layout::Layout;
@@ -249,15 +250,31 @@ fn meter_body(c: &mut Canvas, l: &Layout, app: &App, v: MeterView) {
         }
         return;
     }
-    // The ring records at its own resolution; reduce it to the chart's width.
-    let series = hist.columns(l.content.width() as usize);
-    for (i, &d) in series.iter().enumerate() {
-        let x = l.content.x0 + i as u16;
-        let fg = if app.paused { theme::FAINT } else { theme::level(d, base) };
-        for (j, cell) in meter::column(d, h, &blocks).into_iter().enumerate() {
-            if let Some(ch) = cell {
-                c.set(x, top + h - 1 - j as u16, ch, fg);
-            }
+
+    // The ring records at its own resolution; reduce it to the chart's, which
+    // is two values per cell under a braille theme.
+    let cols = l.content.width();
+    let sub = app.sub_columns();
+    let series = hist.columns(cols as usize * sub);
+    let norm: Vec<f32> = series.iter().map(|d| meter::norm(*d)).collect();
+    let grid = chart::bars(&norm, cols, h, sub == 2, &blocks);
+
+    for (y, row) in grid.iter().enumerate() {
+        for (x, cell) in row.iter().enumerate() {
+            let Some(ch) = cell else { continue };
+            // Level for the spec theme is the loudest of the sub-columns this
+            // cell covers, so a clip can never be averaged out of existence.
+            let d = series[x * sub..(x * sub + sub).min(series.len())]
+                .iter()
+                .copied()
+                .fold(f32::NEG_INFINITY, f32::max);
+            let height = theme::row_height(y as u16, h);
+            let fg = if app.paused {
+                theme::FAINT
+            } else {
+                theme::chart_cell(app.theme, base, d, height)
+            };
+            c.set(l.content.x0 + x as u16, top + h - 1 - y as u16, *ch, fg);
         }
     }
 }
@@ -652,20 +669,40 @@ fn spectrum(c: &mut Canvas, l: &Layout, app: &App) {
         }
     } else {
         let blocks = c.g.blocks;
-        for (i, col) in cols.iter().enumerate().take(l.content.width() as usize) {
-            let cx = l.content.x0 + i as u16;
-            let fg = if app.paused { theme::FAINT } else { theme::level(col.level, base) };
-            for (j, cell) in spectrum_column(col.level, rows, &blocks).into_iter().enumerate() {
-                if let Some(ch) = cell {
-                    c.set(cx, top + rows - 1 - j as u16, ch, fg);
-                }
+        let sub = app.sub_columns();
+        let cells = l.content.width();
+        let norm: Vec<f32> = cols.iter().map(|col| crate::spectrum::norm(col.level)).collect();
+        let grid = chart::bars(&norm, cells, rows, sub == 2, &blocks);
+
+        for (y, row) in grid.iter().enumerate() {
+            for (x, cell) in row.iter().enumerate() {
+                let Some(ch) = cell else { continue };
+                let d = cols[(x * sub).min(cols.len() - 1)..(x * sub + sub).min(cols.len())]
+                    .iter()
+                    .map(|col| col.level)
+                    .fold(f32::NEG_INFINITY, f32::max);
+                let height = theme::row_height(y as u16, rows);
+                let fg = if app.paused {
+                    theme::FAINT
+                } else {
+                    theme::chart_cell(app.theme, base, d, height)
+                };
+                c.set(l.content.x0 + x as u16, top + rows - 1 - y as u16, *ch, fg);
             }
-            // The peak-hold cap, drawn above the live bar so held transients
-            // stay readable after the bar has fallen away from them.
-            if col.hold > col.level + 1.0 {
-                let h = (crate::spectrum::norm(col.hold) * rows as f32).round() as u16;
-                if h > 0 && h <= rows {
-                    c.set(cx, top + rows - h, blocks[0], theme::FAINT);
+        }
+
+        // Peak-hold caps, above the live bars, so held transients stay
+        // readable after the bar has fallen away from them.
+        for (x, chunk) in cols.chunks(sub).enumerate().take(cells as usize) {
+            let hold = chunk.iter().map(|c| c.hold).fold(f32::NEG_INFINITY, f32::max);
+            let level = chunk.iter().map(|c| c.level).fold(f32::NEG_INFINITY, f32::max);
+            if hold > level + 1.0 {
+                let hcell = (crate::spectrum::norm(hold) * rows as f32).round() as u16;
+                if hcell > 0 && hcell <= rows {
+                    // Match the glyph family the bars are drawn in, or the cap
+                    // sits a pixel low and reads as a different kind of mark.
+                    let cap = if sub == 2 { '\u{28C0}' } else { blocks[0] };
+                    c.set(l.content.x0 + x as u16, top + rows - hcell, cap, theme::FAINT);
                 }
             }
         }
@@ -709,27 +746,6 @@ fn spectrum(c: &mut Canvas, l: &Layout, app: &App) {
     }
 }
 
-/// One spectrum column, bottom row first. Same block-glyph scheme as the
-/// meters, on the spectrum's own floor rather than the meters'.
-fn spectrum_column(dbfs: f32, height: u16, blocks: &[char; 8]) -> Vec<Option<char>> {
-    let h = height as usize;
-    let subs = (crate::spectrum::norm(dbfs) * h as f32 * 8.0).round() as usize;
-    let full = subs / 8;
-    let rem = subs % 8;
-    let mut out = vec![None; h];
-    for (i, cell) in out.iter_mut().enumerate() {
-        if i < full {
-            *cell = Some(blocks[7]);
-        } else if i == full && rem > 0 {
-            *cell = Some(blocks[rem - 1]);
-        }
-    }
-    if subs == 0 && h > 0 {
-        out[0] = Some(blocks[0]);
-    }
-    out
-}
-
 // ── the help overlay ─────────────────────────────────────────────────────────
 
 /// `?` is in the footer, in the five keys, and promised by the handoff README as
@@ -768,12 +784,25 @@ fn help(c: &mut Canvas, l: &Layout, app: &App) {
     }
 
     y += 1;
-    let legend: &[(&str, Color, &str)] = &[
-        ("green", theme::GREEN, "output / playback path"),
-        ("cyan", theme::CYAN, "input / capture path"),
-        ("yellow", theme::YELLOW, "above -6 dBFS, or a conversion"),
-        ("red", theme::RED, theme::RED_RULE),
-    ];
+    // The legend describes what a colour *means*, and that changes with the
+    // theme. Under `spec` a bar's colour is its level; under `btop` it is the
+    // bar's height and means nothing on its own. Printing the spec legend
+    // under the btop theme would be a lie on the one screen whose job is to
+    // explain the screen.
+    let legend: &[(&str, Color, &str)] = match app.theme {
+        theme::Theme::Spec => &[
+            ("green", theme::GREEN, "output / playback path"),
+            ("cyan", theme::CYAN, "input / capture path"),
+            ("yellow", theme::YELLOW, "above -6 dBFS, or a conversion"),
+            ("red", theme::RED, theme::RED_RULE),
+        ],
+        theme::Theme::Btop => &[
+            ("green", theme::GREEN, "output / playback path"),
+            ("cyan", theme::CYAN, "input / capture path"),
+            ("bars", theme::YELLOW, "shaded by height, not by meaning"),
+            ("red", theme::RED, "in text and headers only: something is wrong"),
+        ],
+    };
     for (name, col, desc) in legend {
         c.text(inner, inner.x0, y, name, *col, false);
         c.text(inner, inner.x0 + 7, y, desc, theme::DIM, false);
@@ -781,11 +810,11 @@ fn help(c: &mut Canvas, l: &Layout, app: &App) {
     }
 
     y += 1;
-    let last = app
-        .snap
-        .caps
-        .note
-        .clone()
-        .unwrap_or_else(|| "read-only: nothing here changes your audio".into());
+    let last = app.snap.caps.note.clone().unwrap_or_else(|| {
+        format!(
+            "read-only \u{b7} theme {} \u{b7} nothing here changes your audio",
+            app.theme.name()
+        )
+    });
     c.left(inner, y, &last, theme::FAINT);
 }

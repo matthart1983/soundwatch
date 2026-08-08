@@ -11,6 +11,7 @@ use crate::layout::Layout;
 use crate::meter::{self, History};
 use crate::model::{Snapshot, Stream, Verdict, verdict};
 use crate::spectrum::{Source, Spectrum};
+use crate::theme::Theme;
 
 /// Meter sampling rate. The full tool meters at 60 Hz; Lite's chart advances one
 /// column every 769ms, so 20 Hz is four times the resolution the display can
@@ -61,6 +62,8 @@ pub struct App {
     pub in_hist: History,
     pub stream_hist: HashMap<String, History>,
     pub glyphs: Glyphs,
+    /// How charts are coloured and drawn. `--theme`. Set once, at construction.
+    pub theme: Theme,
     /// Where everything goes at the current terminal size. Owned by the App
     /// rather than recomputed in the renderer because the selection has to be
     /// clamped against the list height, and that is not a rendering concern.
@@ -81,23 +84,40 @@ pub struct App {
 
 impl App {
     /// The fixtures, with no audio system behind them.
-    pub fn demo(ascii: bool) -> Self {
-        Self::new(crate::demo::snapshot(0), None, true, ascii)
+    pub fn demo(ascii: bool, theme: Theme) -> Self {
+        Self::new(crate::demo::snapshot(0), None, true, ascii, theme)
     }
 
     /// A live backend, polled on its own thread. Starts on a placeholder
     /// snapshot and replaces it the moment the worker answers — which may be
     /// immediately, or may be after the user has dealt with a consent dialog.
-    pub fn live(worker: BackendWorker, backend: &'static str, host: String, ascii: bool) -> Self {
-        Self::new(Snapshot::starting(backend, host), Some(worker), false, ascii)
+    pub fn live(
+        worker: BackendWorker,
+        backend: &'static str,
+        host: String,
+        ascii: bool,
+        theme: Theme,
+    ) -> Self {
+        Self::new(Snapshot::starting(backend, host), Some(worker), false, ascii, theme)
     }
 
     /// One synchronous snapshot and no worker, for `--once`.
-    pub fn snapshot_only(snap: Snapshot, ascii: bool) -> Self {
-        Self::new(snap, None, false, ascii)
+    pub fn snapshot_only(snap: Snapshot, ascii: bool, theme: Theme) -> Self {
+        Self::new(snap, None, false, ascii, theme)
     }
 
-    fn new(snap: Snapshot, worker: Option<BackendWorker>, demo: bool, ascii: bool) -> Self {
+    /// Private, and takes the theme, so no entry point can forget to pass it.
+    /// It was a settable field for one commit, and `--theme btop` silently did
+    /// nothing in the live TUI because one of the three assignments did not
+    /// survive a reformat. A flag that is accepted and ignored is worse than
+    /// one that is rejected.
+    fn new(
+        snap: Snapshot,
+        worker: Option<BackendWorker>,
+        demo: bool,
+        ascii: bool,
+        theme: Theme,
+    ) -> Self {
         let mut app = Self {
             worker,
             verdict: Verdict::Nominal,
@@ -113,6 +133,7 @@ impl App {
             in_hist: History::new(),
             stream_hist: HashMap::new(),
             glyphs: if ascii { ASCII } else { UNICODE },
+            theme,
             layout: Layout::new(crate::grid::MIN_COLS, crate::grid::MIN_ROWS),
             spectrum: Spectrum::default(),
             demo,
@@ -136,7 +157,7 @@ impl App {
     /// machine with no audio consent — and so CI can render the screen.
     pub fn seed_demo_spectrum(&mut self) {
         let sig = crate::demo::spectrum_signal();
-        let w = self.layout.content.width();
+        let w = self.layout.content.width() * self.sub_columns() as u16;
         // Enough frames to satisfy the detectors' sustain rule.
         let frames = (crate::spectrum::SUSTAIN_SECS / SAMPLE_INTERVAL.as_secs_f32()) as usize + 2;
         for _ in 0..frames {
@@ -185,7 +206,7 @@ impl App {
             match u {
                 Update::Audio(a) => {
                     if self.spectrum.source == a.source {
-                        let w = self.layout.content.width();
+                        let w = self.layout.content.width() * self.sub_columns() as u16;
                         self.spectrum.push_with_overruns(
                             &a.samples,
                             a.rate,
@@ -297,6 +318,15 @@ impl App {
                 Some(q) => s.app.to_lowercase().contains(q) || s.device.to_lowercase().contains(q),
             })
             .collect()
+    }
+
+    /// Sub-columns per cell in charts: two under a braille theme, one
+    /// otherwise. `--ascii` forces one — the whole point of that flag is
+    /// terminals whose glyph coverage cannot be trusted, and braille is a far
+    /// riskier bet than the block elements.
+    pub fn sub_columns(&self) -> usize {
+        let ascii = self.glyphs.blocks[7] != '\u{2588}';
+        crate::chart::sub_columns(self.theme.braille() && !ascii)
     }
 
     /// Adopt a new terminal size. Called once per frame before drawing, so a
@@ -457,7 +487,7 @@ mod tests {
     use super::*;
 
     fn app() -> App {
-        App::demo(false)
+        App::demo(false, Theme::default())
     }
 
     fn key(c: KeyCode) -> KeyEvent {
@@ -574,6 +604,7 @@ mod tests {
             "wedged",
             "test".into(),
             false,
+            Theme::default(),
         );
         live.poll_backend();
         assert_eq!(live.backend_stall(), Some("reading the audio system\u{2026}"));
@@ -592,6 +623,7 @@ mod tests {
             "stub",
             "test".into(),
             false,
+            Theme::default(),
         );
         for _ in 0..500 {
             live.poll_backend();
