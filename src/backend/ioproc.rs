@@ -80,10 +80,25 @@ pub struct MeterState {
     /// Peak tells you whether you are clipping; RMS tells you how loud it
     /// actually is, and the gap between them is the crest factor — which is how
     /// you tell a compressed master from a live take at the same peak level.
-    /// Accumulated as bits of an `f64` so the sum survives a long block without
-    /// losing the quiet samples to rounding.
+    ///
+    /// Both are **cumulative** and are published together under `rms_seq`, a
+    /// seqlock. Reading them as two independent atomics cannot be made
+    /// correct in either order: whichever is taken first, a callback landing
+    /// between the two reads pairs a sum with a count that does not describe
+    /// it. In the worst interleaving the reader takes a sum of zero against a
+    /// non-zero count and reports -120 dBFS — a silent frame, from a signal
+    /// that was not silent, with a crest factor of a hundred decibels beside
+    /// it. The writer never spins (two stores either side of the update); the
+    /// reader retries a bounded number of times and gives up rather than
+    /// blocking the audio thread's progress.
     sum_sq: AtomicU64,
     sum_n: AtomicU64,
+    /// Even between updates, odd during one.
+    rms_seq: AtomicU64,
+    /// What the reader has already accounted for. Only the reader writes
+    /// these, so they need no synchronisation of their own.
+    read_sq: AtomicU64,
+    read_n: AtomicU64,
     /// Latched the first time any sample is non-zero. Never cleared: it is the
     /// evidence that consent was granted, and one sample is enough.
     pub ever_signal: AtomicBool,
@@ -115,6 +130,9 @@ impl Default for MeterState {
             ever_signal: AtomicBool::new(false),
             sum_sq: AtomicU64::new(0),
             sum_n: AtomicU64::new(0),
+            rms_seq: AtomicU64::new(0),
+            read_sq: AtomicU64::new(0),
+            read_n: AtomicU64::new(0),
             ring: (0..RING_FRAMES).map(|_| AtomicU32::new(0)).collect(),
             written: AtomicU64::new(0),
             overruns: AtomicU64::new(0),
@@ -123,6 +141,49 @@ impl Default for MeterState {
 }
 
 impl MeterState {
+    /// RMS since the last call, in dBFS, clearing as it reads.
+    ///
+    /// Lives here rather than on the meter so it can be exercised
+    /// concurrently: `IoProcMeter` holds raw CoreAudio handles and is
+    /// deliberately not `Sync`, but this is nothing but atomics.
+    pub fn take_rms_dbfs(&self) -> Option<f32> {
+        // Seqlock read: a pair taken while the writer was mid-update is
+        // discarded rather than used. Bounded, because the caller is a 20 Hz
+        // sampler and a missed frame is a missed frame, not a stall.
+        let mut pair = None;
+        for _ in 0..8 {
+            let before = self.rms_seq.load(Ordering::Acquire);
+            if !before.is_multiple_of(2) {
+                continue;
+            }
+            let sum = f64::from_bits(self.sum_sq.load(Ordering::Relaxed));
+            let n = self.sum_n.load(Ordering::Relaxed);
+            if self.rms_seq.load(Ordering::Acquire) == before {
+                pair = Some((sum, n));
+                break;
+            }
+        }
+        let (total_sq, total_n) = pair?;
+
+        // Cumulative totals, so the reader subtracts what it has already had
+        // rather than resetting shared state the writer is still adding to.
+        let seen_sq = f64::from_bits(self.read_sq.load(Ordering::Relaxed));
+        let seen_n = self.read_n.load(Ordering::Relaxed);
+        self.read_sq.store(total_sq.to_bits(), Ordering::Relaxed);
+        self.read_n.store(total_n, Ordering::Relaxed);
+
+        let n = total_n.wrapping_sub(seen_n);
+        let sum = total_sq - seen_sq;
+        if n == 0 {
+            return None;
+        }
+        let rms = (sum.max(0.0) / n as f64).sqrt() as f32;
+        if !rms.is_finite() || rms <= 0.0 {
+            return Some(crate::meter::CAPTURE_FLOOR_DBFS);
+        }
+        Some((20.0 * rms.log10()).clamp(crate::meter::CAPTURE_FLOOR_DBFS, 0.0))
+    }
+
     /// The most recent `n` samples, oldest first.
     ///
     /// Lock-free and wait-free on both sides: the writer never coordinates with
@@ -154,7 +215,34 @@ impl MeterState {
 }
 
 /// The IOProc. Real-time thread: no allocation, no locks, no syscalls.
+///
+/// A panic here does not unwind into CoreAudio — since Rust 1.81 an
+/// `extern "C"` function aborts the process instead, and a diagnostic tool
+/// that kills itself while you are diagnosing something is worse than useless.
+/// The body below is written to have nothing that can panic (every slice comes
+/// from a length derived from `data_byte_size`, every index is bounds-checked
+/// or taken modulo, the one division is guarded), and `catch_unwind` is a
+/// backstop for the edit that overlooks that. It costs nothing when nothing
+/// panics.
 extern "C" fn peak_io_proc(
+    device: AudioObjectID,
+    now: *const AudioTimeStamp,
+    input: *const AudioBufferListRaw,
+    input_time: *const AudioTimeStamp,
+    output: *mut AudioBufferListRaw,
+    output_time: *const AudioTimeStamp,
+    client: *mut c_void,
+) -> OSStatus {
+    let guarded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        peak_io_proc_inner(device, now, input, input_time, output, output_time, client)
+    }));
+    // A panic that got this far has already printed through the hook; there is
+    // nothing safe to do on this thread but return quietly and let the level
+    // freeze, which the UI reports as a meter that has stopped moving.
+    guarded.unwrap_or(0)
+}
+
+fn peak_io_proc_inner(
     _device: AudioObjectID,
     _now: *const AudioTimeStamp,
     input: *const AudioBufferListRaw,
@@ -199,7 +287,13 @@ extern "C" fn peak_io_proc(
                 if a > peak {
                     peak = a;
                 }
-                sum_sq += (*s as f64) * (*s as f64);
+                // A non-finite sample from a misbehaving driver would
+                // otherwise poison the whole accumulator: NaN propagates
+                // through the sqrt and out through `clamp`, which does not
+                // clamp NaN, and the meter prints `NaN dBFS`.
+                if s.is_finite() {
+                    sum_sq += (*s as f64) * (*s as f64);
+                }
             }
             sample_count += n_samples_of(b);
         }
@@ -254,9 +348,18 @@ extern "C" fn peak_io_proc(
     // reads, and an RMS over the newest block alone would be a different
     // measurement each time depending on the buffer size.
     if sample_count > 0 {
+        // Seqlock write: odd while the pair is inconsistent, even when it is
+        // publishable again. Two stores and two adds — no loop, no blocking,
+        // which is the only acceptable shape on this thread.
+        let seq = state.rms_seq.load(Ordering::Relaxed);
+        state.rms_seq.store(seq.wrapping_add(1), Ordering::Release);
         let prev = f64::from_bits(state.sum_sq.load(Ordering::Relaxed));
         state.sum_sq.store((prev + sum_sq).to_bits(), Ordering::Relaxed);
-        state.sum_n.fetch_add(sample_count, Ordering::Relaxed);
+        state.sum_n.store(
+            state.sum_n.load(Ordering::Relaxed).wrapping_add(sample_count),
+            Ordering::Relaxed,
+        );
+        state.rms_seq.store(seq.wrapping_add(2), Ordering::Release);
     }
     0
 }
@@ -342,16 +445,7 @@ impl IoProcMeter {
     /// RMS since the last call, in dBFS, and the count it was taken over.
     /// Reading clears, so successive calls do not overlap.
     pub fn rms_dbfs(&self) -> Option<f32> {
-        let n = self.state.sum_n.swap(0, Ordering::Relaxed);
-        let sum = f64::from_bits(self.state.sum_sq.swap(0, Ordering::Relaxed));
-        if n == 0 {
-            return None;
-        }
-        let rms = (sum / n as f64).sqrt() as f32;
-        if rms <= 0.0 {
-            return Some(crate::meter::CAPTURE_FLOOR_DBFS);
-        }
-        Some((20.0 * rms.log10()).clamp(crate::meter::CAPTURE_FLOOR_DBFS, 0.0))
+        self.state.take_rms_dbfs()
     }
 
     /// Peak since the last call, in dBFS. `None` until the first block arrives.
@@ -506,6 +600,49 @@ mod tests {
         assert!((db + 3.01).abs() < 0.05, "full-scale sine RMS read {db} dBFS");
         // Reading clears, so there is nothing to double-count.
         assert_eq!(m.rms_dbfs(), None, "rms did not clear on read");
+    }
+
+    #[test]
+    fn a_non_finite_sample_cannot_poison_the_meter() {
+        let m = IoProcMeter::detached();
+        m.state.sum_sq.store(f64::NAN.to_bits(), Ordering::Relaxed);
+        m.state.sum_n.store(64, Ordering::Relaxed);
+        // NaN must come back as silence, not as `NaN dBFS` on the screen.
+        assert_eq!(m.rms_dbfs(), Some(crate::meter::CAPTURE_FLOOR_DBFS));
+    }
+
+    /// The callback and the reader must not be able to pair a sum with the
+    /// wrong count. Driven concurrently, every reading has to be a level that
+    /// could actually have been measured.
+    #[test]
+    fn concurrent_accumulation_never_reports_an_impossible_level() {
+        use std::sync::Arc;
+        let m = Arc::new(MeterState::default());
+        let writer = {
+            let m = m.clone();
+            std::thread::spawn(move || {
+                for _ in 0..20_000 {
+                    // Every sample is exactly half scale, so any honest
+                    // reading is -6.02 dBFS whatever window it covers.
+                    let block = 64.0f64 * 0.25;
+                    let seq = m.rms_seq.load(Ordering::Relaxed);
+                    m.rms_seq.store(seq.wrapping_add(1), Ordering::Release);
+                    let prev = f64::from_bits(m.sum_sq.load(Ordering::Relaxed));
+                    m.sum_sq.store((prev + block).to_bits(), Ordering::Relaxed);
+                    m.sum_n.store(m.sum_n.load(Ordering::Relaxed) + 64, Ordering::Relaxed);
+                    m.rms_seq.store(seq.wrapping_add(2), Ordering::Release);
+                }
+            })
+        };
+        for _ in 0..20_000 {
+            if let Some(db) = m.take_rms_dbfs() {
+                assert!(
+                    (db + 6.02).abs() < 0.5,
+                    "read {db} dBFS from a stream of half-scale samples"
+                );
+            }
+        }
+        writer.join().unwrap();
     }
 
     #[test]

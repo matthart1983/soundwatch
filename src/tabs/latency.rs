@@ -21,11 +21,21 @@ pub const TIGHT_BUFFER_FRAMES: u32 = 128;
 pub fn draw(c: &mut Canvas, l: &Layout, app: &App) {
     let mut y = l.body_top;
     let f = l.content;
+    let bottom = l.body_top + l.body_rows;
+    // The round trip is the number this tab exists to produce, so its rows are
+    // reserved before anything else is drawn. Without that, at the minimum
+    // height the two breakdowns consumed the whole body and the figure landed
+    // on the footer rule, which is drawn after the body and painted over it.
+    const TRIP_ROWS: u16 = 4;
+    let paths_bottom = bottom.saturating_sub(TRIP_ROWS);
 
     for (title, dev) in [
         ("output path", app.snap.default_out.as_ref()),
         ("input path", app.snap.default_in.as_ref()),
     ] {
+        if y + 2 > paths_bottom {
+            break;
+        }
         super::section(c, f, y, title);
         y += 1;
         match dev {
@@ -34,16 +44,14 @@ pub fn draw(c: &mut Canvas, l: &Layout, app: &App) {
                 y += 2;
             }
             Some(d) => {
-                y = path(c, f, y, d);
+                y = path(c, f, y, d, paths_bottom);
                 y += 1;
             }
-        }
-        if y >= l.body_top + l.body_rows {
-            return;
         }
     }
 
     // The round trip, which is the number a musician actually cares about.
+    let mut y = y.min(paths_bottom);
     super::section(c, f, y, "round trip");
     y += 1;
     let total = app.snap.latency_ms();
@@ -74,8 +82,8 @@ pub fn draw(c: &mut Canvas, l: &Layout, app: &App) {
     }
 }
 
-/// One path's breakdown. Returns the row after it.
-fn path(c: &mut Canvas, f: Field, mut y: u16, d: &Device) -> u16 {
+/// One path's breakdown, bounded by `bottom`. Returns the row after it.
+fn path(c: &mut Canvas, f: Field, mut y: u16, d: &Device, bottom: u16) -> u16 {
     let rate = d.format.rate.max(1) as f32;
     let ms = |frames: u32| frames as f32 * 1000.0 / rate;
 
@@ -94,6 +102,9 @@ fn path(c: &mut Canvas, f: Field, mut y: u16, d: &Device) -> u16 {
     let bar_w = f.width().saturating_sub(46).clamp(6, 30);
 
     for (label, frames, yours) in parts {
+        if y >= bottom {
+            return y;
+        }
         c.left(Field::at(f.x0 + 2, 16), y, label, theme::DIM);
         c.right(Field::at(f.x0 + 19, 8), y, &fmt::frames(frames), theme::FG);
         c.right(Field::at(f.x0 + 29, 9), y, &fmt::ms(ms(frames), 9), theme::FG);
@@ -107,13 +118,18 @@ fn path(c: &mut Canvas, f: Field, mut y: u16, d: &Device) -> u16 {
         y += 1;
     }
 
+    if y >= bottom {
+        return y;
+    }
     let total_frames = d.buffer_frames + d.latency_frames;
     c.left(Field::at(f.x0 + 2, 16), y, "total", theme::DIM);
     c.right(Field::at(f.x0 + 19, 8), y, &fmt::frames(total_frames), theme::FG);
     c.right(Field::at(f.x0 + 29, 9), y, &fmt::ms(ms(total_frames), 9), theme::BR_WHITE);
     y += 1;
 
-    if let Some((lo, hi)) = d.buffer_range {
+    if y < bottom
+        && let Some((lo, hi)) = d.buffer_range
+    {
         let hint = if d.buffer_frames <= TIGHT_BUFFER_FRAMES {
             format!("buffer range {lo}-{hi}fr \u{b7} already tight; xruns here mean raise it")
         } else {

@@ -949,7 +949,10 @@ fn help(c: &mut Canvas, l: &Layout, app: &App) {
     // large terminal. Width and height are capped: a help panel that grows to
     // fill a 200-column screen is a wall of text, not an overlay.
     let panel_w = 62u16.min(l.content.width().saturating_sub(4));
-    let panel_h = 18u16.min(l.h.saturating_sub(4));
+    // Nine key rows, a blank, four legend rows, a blank and the note, plus two
+    // borders: twenty. At eighteen the note landed exactly on the bottom
+    // border and overwrote it.
+    let panel_h = 20u16.min(l.h.saturating_sub(2));
     let x0 = l.content.x0 + (l.content.width().saturating_sub(panel_w)) / 2;
     let outer = Field::at(x0, panel_w);
     let y0 = (l.h.saturating_sub(panel_h)) / 2;

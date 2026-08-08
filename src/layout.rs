@@ -110,9 +110,11 @@ impl Layout {
         let body_top = if tabs { row_tab_rule + 1 } else { 0 };
         let row_footer = h - 1;
         let row_footer_rule = row_footer.saturating_sub(1);
-        // The body ends above the footer rule under Tabs, and above the prompt
-        // row under Lite.
-        let body_bottom = if tabs { row_footer_rule.saturating_sub(1) } else { row_footer - 1 };
+        // The body ends above the *prompt* under Tabs, not above the footer
+        // rule: they were the same row, so every tab that used its last line
+        // had a stream-range readout drawn over it — a readout that means
+        // nothing on nine of the ten tabs.
+        let body_bottom = if tabs { row_footer_rule.saturating_sub(2) } else { row_footer - 1 };
         let body_rows = (body_bottom + 1).saturating_sub(body_top);
 
         // ── height ──────────────────────────────────────────────────────────

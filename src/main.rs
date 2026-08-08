@@ -375,7 +375,10 @@ fn render_once_at(
         "detail" => app.on_key(press(KeyCode::Enter)),
         "help" => app.on_key(press(KeyCode::Char('?'))),
         "settings" => app.on_key(press(KeyCode::Char(','))),
-        "spectrum" => {
+        // Lite reaches the spectrum with `s`; the full product has a tab for
+        // it, and the tab-name arm below handles that. Without this split the
+        // literal arm shadowed the tab and `--once spectrum` rendered Overview.
+        "spectrum" if app.cfg.lite => {
             app.on_key(press(KeyCode::Char('s')));
             if app.demo {
                 app.seed_demo_spectrum();
@@ -737,6 +740,95 @@ mod tests {
         assert!(app.spectrum.source.is_on(), "the spectrum tab did not start the audio");
         app.select_tab(crate::tabs::Tab::Devices);
         assert!(!app.spectrum.source.is_on(), "leaving the tab left the audio running");
+    }
+
+    /// Every tab's list has to be selectable, and the selection has to be
+    /// bounded by the list actually on screen. It used to be bounded by the
+    /// stream count on every tab, so with nothing playing the Devices tab's
+    /// selection was frozen on row one.
+    #[test]
+    fn every_listed_tab_can_be_scrolled() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+
+        for (tab, len) in [
+            (crate::tabs::Tab::Devices, 6usize),
+            (crate::tabs::Tab::Streams, 8),
+            (crate::tabs::Tab::Timeline, 5),
+        ] {
+            let mut app = App::demo(config::Config::default());
+            app.set_viewport(130, 36);
+            app.select_tab(tab);
+            assert_eq!(app.selectable(), len, "{tab:?} sized its selection wrongly");
+            app.on_key(down);
+            assert_eq!(app.sel, 1, "{tab:?} could not move the selection");
+        }
+
+        // With nothing playing at all, Devices must still be navigable.
+        let mut app = App::demo(config::Config::default());
+        app.set_viewport(130, 36);
+        app.snap.streams.clear();
+        app.select_tab(crate::tabs::Tab::Devices);
+        app.on_key(down);
+        assert_eq!(app.sel, 1, "Devices froze when no audio was playing");
+    }
+
+    /// The tabbed tables draw into the body, which is taller than the Lite
+    /// list. Sizing the scroll window by the wrong one hid rows above a table
+    /// with blank space below it.
+    #[test]
+    fn tabbed_tables_scroll_by_the_height_they_draw_at() {
+        let mut app = App::demo(config::Config::default());
+        app.set_viewport(130, 36);
+        app.select_tab(crate::tabs::Tab::Streams);
+        let l = crate::layout::Layout::new(130, 36, crate::layout::Chrome::Tabs);
+        assert_eq!(app.list_rows(), l.body_rows as usize - 2);
+        // Eight demo streams fit in that, so nothing should ever scroll.
+        for _ in 0..20 {
+            app.on_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Down,
+                crossterm::event::KeyModifiers::NONE,
+            ));
+        }
+        assert_eq!(app.scroll, 0, "a list that fits was scrolled anyway");
+    }
+
+    /// The body must not share its last row with the prompt: nine of the ten
+    /// tabs have no stream range to report, and the readout landed on their
+    /// content.
+    #[test]
+    fn the_body_does_not_reach_the_prompt_row() {
+        for &(w, h) in SIZES {
+            let l = crate::layout::Layout::new(w, h, crate::layout::Chrome::Tabs);
+            assert!(
+                l.body_top + l.body_rows <= l.row_prompt,
+                "at {w}x{h} the body runs into the prompt row"
+            );
+            assert!(l.row_prompt < l.row_footer_rule);
+        }
+    }
+
+    /// The help overlay's last line used to be drawn on its own bottom border.
+    #[test]
+    fn the_help_panel_keeps_its_border() {
+        for &(w, h) in SIZES {
+            let f = frame_at("help", w, h);
+            let bottom = f
+                .iter()
+                .rev()
+                .find(|l| l.contains('\u{2514}') || l.contains('\u{2518}'))
+                .unwrap_or_else(|| panic!("no bottom border at {w}x{h}"));
+            // Only the span between the corners belongs to the panel; the
+            // screen behind it is still drawn either side.
+            let chars: Vec<char> = bottom.chars().collect();
+            let l0 = chars.iter().position(|c| *c == '\u{2514}').expect("a left corner");
+            let r0 = chars.iter().rposition(|c| *c == '\u{2518}').expect("a right corner");
+            let inside: String = chars[l0 + 1..r0].iter().collect();
+            assert!(
+                inside.chars().all(|c| c == '\u{2500}'),
+                "text on the panel border at {w}x{h}: {inside:?}"
+            );
+        }
     }
 
     /// The Lite screen is still the Lite screen: --lite must not have grown a

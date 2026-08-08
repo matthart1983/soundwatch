@@ -26,7 +26,7 @@ BIN     := soundwatch-lite
 RELEASE := target/release/$(BIN)
 DEBUG   := target/debug/$(BIN)
 
-.PHONY: all build debug run test check fmt lint sign install uninstall clean probe
+.PHONY: all build debug run test check fmt lint sign install uninstall clean probe hooks
 
 all: build
 
@@ -65,6 +65,11 @@ fmt:
 ## lint — clippy, warnings are errors
 lint:
 	$(CARGO) clippy --all-targets -- -D warnings
+
+## hooks — refuse commits that do not build, lint and test clean
+hooks:
+	git config core.hooksPath .githooks
+	@echo "pre-commit hook enabled (bypass with git commit --no-verify)"
 
 ## check — what CI runs
 check:

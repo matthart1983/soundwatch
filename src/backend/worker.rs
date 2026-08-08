@@ -23,7 +23,7 @@
 //! failure in this program already has.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::time::Instant;
 
@@ -78,6 +78,8 @@ pub struct BackendWorker {
     wants: Wants,
     /// Whether the settings menu currently wants the input meter open.
     input: Arc<AtomicBool>,
+    /// Samples per spectrum window, from the settings menu.
+    window_len: Arc<AtomicUsize>,
 }
 
 impl BackendWorker {
@@ -90,6 +92,8 @@ impl BackendWorker {
         let asked = wants.clone();
         let input = Arc::new(AtomicBool::new(false));
         let want_input = input.clone();
+        let window_len = Arc::new(AtomicUsize::new(crate::dsp::FFT_SIZE));
+        let want_window = window_len.clone();
 
         let spawned = std::thread::Builder::new()
             .name("soundwatch-backend".into())
@@ -102,7 +106,11 @@ impl BackendWorker {
                     return;
                 }
                 let mut last_tick = Instant::now();
-                let mut input_on = false;
+                // Seeded from the backend rather than assumed: a session
+                // launched with --meter-input starts with it already open, and
+                // a worker that believes otherwise ignores the first switch-off.
+                let mut input_on = backend.input_metering();
+                let mut window = 0usize;
                 loop {
                     std::thread::sleep(crate::app::SAMPLE_INTERVAL);
                     if flag.load(Ordering::Relaxed) {
@@ -117,6 +125,11 @@ impl BackendWorker {
                     if want_in != input_on {
                         input_on = want_in;
                         backend.set_input_metering(want_in);
+                    }
+                    let want_len = want_window.load(Ordering::Relaxed);
+                    if want_len != window {
+                        window = want_len;
+                        backend.set_window_len(want_len);
                     }
                     let want = asked.get();
                     if want.is_on()
@@ -138,7 +151,12 @@ impl BackendWorker {
         if !spawned {
             stop.store(true, Ordering::Relaxed);
         }
-        Self { rx, stop, wants, input }
+        Self { rx, stop, wants, input, window_len }
+    }
+
+    /// Tell the backend how many samples the spectrum wants per window.
+    pub fn want_window_len(&self, n: usize) {
+        self.window_len.store(n, Ordering::Relaxed);
     }
 
     /// Ask the backend to open or close the input meter.

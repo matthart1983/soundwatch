@@ -1,0 +1,34 @@
+#!/bin/sh
+# Refuse a commit that does not build, lint and test clean.
+#
+# This exists because a broken commit was made and had to be amended: `git
+# commit` and `make check` ran in one chain, so the commit landed before the
+# check reported. A commit that does not compile is a commit someone else will
+# bisect through.
+#
+# Checks the working tree, not the index, which is the same thing whenever you
+# commit everything you changed and a useful over-approximation when you do
+# not. Enable with `make hooks`; bypass, deliberately and rarely, with
+# `git commit --no-verify`.
+set -e
+
+fail() {
+    echo >&2
+    echo "pre-commit: $1" >&2
+    echo "pre-commit: fix it, or commit with --no-verify if you mean it." >&2
+    exit 1
+}
+
+echo "pre-commit: fmt"
+cargo fmt --check >/dev/null 2>&1 || fail "formatting is not clean (run 'cargo fmt')"
+
+echo "pre-commit: clippy"
+cargo clippy --all-targets -- -D warnings >/dev/null 2>&1 \
+    || { cargo clippy --all-targets -- -D warnings 2>&1 | sed -n '/^error/,$p' | head -30
+         fail "clippy is not clean"; }
+
+echo "pre-commit: test"
+cargo test --quiet >/dev/null 2>&1 \
+    || { cargo test --quiet 2>&1 | tail -20; fail "tests are failing"; }
+
+echo "pre-commit: ok"

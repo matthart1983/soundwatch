@@ -159,6 +159,11 @@ impl App {
         if demo {
             app.seed_demo();
         }
+        // Without this the saved config reaches the menu but not the analyser:
+        // fft_size, the floors and the ballistics only ever arrived through
+        // `change_setting`, so a saved spectrum setup silently reverted on
+        // every restart — which defeats the point of saving it.
+        app.apply_config();
         app.recompute_verdict();
         app
     }
@@ -365,6 +370,7 @@ impl App {
         self.spectrum.configure(&self.cfg);
         if let Some(w) = &self.worker {
             w.want_input_meter(self.cfg.meter_input);
+            w.want_window_len(self.spectrum.window_len());
         }
         self.recompute_verdict();
     }
@@ -391,13 +397,40 @@ impl App {
         if self.cfg.lite { Chrome::Lite } else { Chrome::Tabs }
     }
 
-    /// Rows the table can show in the current mode.
+    /// Rows the table on the current screen can show.
+    ///
+    /// Not the Lite table's height on the tabbed screens: they draw into the
+    /// body, which is four rows taller than the Lite list at 80x24 and far
+    /// taller on a real terminal. Sizing the selection window by the wrong one
+    /// scrolled rows off the top of a table with blank space below it.
     pub fn list_rows(&self) -> usize {
-        self.layout.list_rows_for(self.mode == Mode::Detail) as usize
+        if self.cfg.lite {
+            self.layout.list_rows_for(self.mode == Mode::Detail) as usize
+        } else {
+            // Every tabbed table reserves its header and rule.
+            self.layout.body_rows.saturating_sub(2) as usize
+        }
+    }
+
+    /// How many rows the selection can move over on the current screen.
+    ///
+    /// The tabs put very different lists under one selection index — twelve
+    /// devices, three insights, eight streams — so the bound has to come from
+    /// whichever one is being drawn, or Up/Down does nothing on most of them.
+    pub fn selectable(&self) -> usize {
+        if self.cfg.lite {
+            return self.visible().len();
+        }
+        match self.tab {
+            Tab::Devices => self.snap.devices.len(),
+            Tab::Xruns => self.snap.xrun_log.len(),
+            Tab::Timeline => self.snap.events.len(),
+            _ => self.visible().len(),
+        }
     }
 
     fn clamp_selection(&mut self) {
-        let n = self.visible().len();
+        let n = self.selectable();
         if n == 0 {
             self.sel = 0;
             self.scroll = 0;
@@ -418,7 +451,7 @@ impl App {
     }
 
     fn move_sel(&mut self, delta: isize) {
-        let n = self.visible().len();
+        let n = self.selectable();
         if n == 0 {
             return;
         }
@@ -618,7 +651,7 @@ impl App {
                 self.clamp_selection();
             }
             KeyCode::End => {
-                self.sel = self.visible().len().saturating_sub(1);
+                self.sel = self.selectable().saturating_sub(1);
                 self.clamp_selection();
             }
             // Demo-only: exercise the alert state without waiting for a glitch.

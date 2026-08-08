@@ -16,20 +16,35 @@ pub fn draw(c: &mut Canvas, l: &Layout, app: &App) {
     let x0 = l.content.x0;
     let x1 = l.content.x1;
 
-    // Fixed columns first, then hand what is left to the two name fields —
-    // laying them out left to right with fixed widths overflows the moment the
-    // terminal is wider than the guess.
-    const FIXED: u16 = 7 + 9 + 8 + 9 + 9 + 5 * 2; // pid, rate, lat, held, spark
-    let slack = l.content.width().saturating_sub(FIXED + 8);
-    let app_w = (14 + slack / 3).clamp(10, 24);
-    let dev_w = (16 + slack * 2 / 3).clamp(12, 40);
+    // Laid out right to left from the fixed columns, so the two elastic name
+    // fields get exactly what is left and the table always ends on the margin.
+    // Laying it out left to right from guessed widths overflowed from 80 to
+    // about 104 columns: HELD fell off the screen and the sparkline was never
+    // drawn at all.
+    const PID_W: u16 = 7;
+    const RATE_W: u16 = 9;
+    const LAT_W: u16 = 8;
+    const HELD_W: u16 = 9;
+    const SPARK_W: u16 = 9;
+    const GAP: u16 = 2;
+
+    let total = l.content.width();
+    // Everything except the two names, including the gaps between them.
+    let fixed = PID_W + RATE_W + LAT_W + HELD_W + 5 * GAP;
+    let with_spark = fixed + SPARK_W + GAP;
+    let spark = total >= with_spark + 24;
+    let reserved = if spark { with_spark } else { fixed };
+    let names = total.saturating_sub(reserved).max(12);
+    let app_w = (names / 3).clamp(8, 24);
+    let dev_w = names.saturating_sub(app_w).max(8);
 
     let f_app = Field::at(x0, app_w);
-    let f_pid = Field::at(f_app.x1 + 2, 7);
-    let f_dev = Field::at(f_pid.x1 + 2, dev_w);
-    let f_rate = Field::at(f_dev.x1 + 2, 9);
-    let f_lat = Field::at(f_rate.x1 + 2, 8);
-    let f_held = Field::at(f_lat.x1 + 2, 9);
+    let f_pid = Field::at(f_app.x1 + GAP, PID_W);
+    let f_dev = Field::at(f_pid.x1 + GAP, dev_w);
+    let f_rate = Field::at(f_dev.x1 + GAP, RATE_W);
+    let f_lat = Field::at(f_rate.x1 + GAP, LAT_W);
+    let f_held = Field::at(f_lat.x1 + GAP, HELD_W);
+    let f_spark = spark.then(|| Field::new(f_held.x1 + GAP, x1));
 
     super::table_head(
         c,
@@ -58,7 +73,7 @@ pub fn draw(c: &mut Canvas, l: &Layout, app: &App) {
         return;
     }
 
-    let rows = l.body_rows.saturating_sub(2) as usize;
+    let rows = app.list_rows();
     for (i, s) in visible.iter().skip(app.scroll).take(rows).enumerate() {
         let y = top + 2 + i as u16;
         let idx = app.scroll + i;
@@ -95,10 +110,8 @@ pub fn draw(c: &mut Canvas, l: &Layout, app: &App) {
         c.right(f_held, y, &fmt::hms(app.snap.at.secs_since(s.first_seen)), theme::FAINT);
     }
 
-    // The 60s sparkline column, if there is width left for it.
-    let spark_x = f_held.x1 + 2;
-    if spark_x + 9 <= x1 {
-        let f_spark = Field::new(spark_x, x1);
+    // The 60s sparkline column, when the width was there to reserve one.
+    if let Some(f_spark) = f_spark {
         c.left(f_spark, top, "60s", theme::DIM);
         for (i, s) in visible.iter().skip(app.scroll).take(rows).enumerate() {
             let y = top + 2 + i as u16;

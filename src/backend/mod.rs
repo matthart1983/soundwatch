@@ -148,6 +148,21 @@ pub trait AudioBackend: Send {
     /// steps. Default is a no-op for backends with nothing to open.
     fn set_input_metering(&mut self, _on: bool) {}
 
+    /// How many samples the spectrum wants per window.
+    ///
+    /// The analysis size is configurable, so this cannot be a constant on
+    /// either side: an analyser rebuilt for 8192 points fed 4096 samples
+    /// zero-pads the rest, which multiplies the signal by half a window and
+    /// reads about 6 dB low across every bin while the header confidently
+    /// reports the larger size.
+    fn set_window_len(&mut self, _n: usize) {}
+
+    /// Whether the input meter is currently open, so the worker can seed its
+    /// own idea of the state rather than assuming it starts closed.
+    fn input_metering(&self) -> bool {
+        false
+    }
+
     /// A window of audio for the spectrum, when one is being asked for.
     ///
     /// Separate from `levels` because it is only collected while the spectrum

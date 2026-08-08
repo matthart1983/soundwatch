@@ -50,14 +50,19 @@ static LISTENING: Mutex<BTreeSet<AudioObjectID>> = Mutex::new(BTreeSet::new());
 /// only version of that fact you can act on.
 static LAST_OVERLOAD: AtomicU32 = AtomicU32::new(0);
 
+/// Called from a CoreAudio thread. As with the IOProc, a panic here aborts
+/// rather than unwinding, so it is guarded — the body is two atomic stores and
+/// cannot panic today, but this is an FFI boundary and the cost is nothing.
 extern "C" fn overload_listener(
     id: AudioObjectID,
     _n: u32,
     _addrs: *const AudioObjectPropertyAddress,
     _data: *mut std::ffi::c_void,
 ) -> i32 {
-    XRUNS.fetch_add(1, Ordering::Relaxed);
-    LAST_OVERLOAD.store(id, Ordering::Relaxed);
+    let _ = std::panic::catch_unwind(|| {
+        XRUNS.fetch_add(1, Ordering::Relaxed);
+        LAST_OVERLOAD.store(id, Ordering::Relaxed);
+    });
     0
 }
 
@@ -148,7 +153,13 @@ pub struct CoreAudio {
     xrun_log: VecDeque<XrunEvent>,
     events: VecDeque<SessionEvent>,
     /// Previous tick's world, for diffing into events.
-    prev_devices: Vec<(String, Format, bool)>,
+    ///
+    /// Keyed by `(name, direction)`, not by name: `snapshot` emits one entry
+    /// per (device, direction), so a duplex interface appears twice under one
+    /// name. Keyed by name alone the two halves overwrite each other and then
+    /// compare against each other's format every tick — which reported a
+    /// format change, once per second, from a value to itself.
+    prev_devices: Vec<((String, bool), Format)>,
     prev_default_out: Option<String>,
     prev_default_in: Option<String>,
     prev_streams: HashSet<String>,
@@ -366,23 +377,49 @@ impl CoreAudio {
         if !self.started {
             self.started = true;
             self.log(now, EventKind::Started, format!("{} devices", devices.len()));
+            // What was already playing when we attached is the initial state,
+            // not something that happened; logging it as StreamOpened a second
+            // after launch is a lie about when it started.
+            self.prev_streams = streams.iter().map(|s| s.key.clone()).collect();
         } else {
             // Collected before logging: `log` takes &mut self and the diff
             // borrows the previous state immutably.
-            let prev: HashMap<String, Format> =
-                self.prev_devices.iter().map(|(n, f, _)| (n.clone(), *f)).collect();
+            // Collected before logging: `log` takes &mut self and the diff
+            // borrows the previous state immutably.
+            //
+            // Keyed by (name, direction). `snapshot` emits one entry per
+            // (device, direction), so a duplex interface appears twice under
+            // one name; keyed by name alone the two halves overwrite each other
+            // and then compare against each other's format every tick, which
+            // reported a format change — from a value to itself — once a second
+            // for as long as the tool was open.
+            let prev: HashMap<(String, bool), Format> =
+                self.prev_devices.iter().map(|(k, f)| (k.clone(), *f)).collect();
+            let known: HashSet<&str> = prev.keys().map(|(n, _)| n.as_str()).collect();
+
             let mut changes: Vec<(EventKind, String)> = Vec::new();
+            let mut announced: HashSet<&str> = HashSet::new();
             for d in devices {
-                match prev.get(&d.name) {
-                    None => changes.push((
-                        EventKind::DeviceAdded,
-                        format!("{} ({})", d.name, d.transport.name()),
-                    )),
+                let key = (d.name.clone(), d.direction.is_input());
+                match prev.get(&key) {
+                    // A new device announces itself once, not once per scope.
+                    None if !known.contains(d.name.as_str())
+                        && announced.insert(d.name.as_str()) =>
+                    {
+                        changes.push((
+                            EventKind::DeviceAdded,
+                            format!("{} ({})", d.name, d.transport.name()),
+                        ));
+                    }
+                    // A scope appearing on a device we already knew about is
+                    // not a new device and not a format change.
+                    None => {}
                     Some(f) if *f != d.format => changes.push((
                         EventKind::FormatChanged,
                         format!(
-                            "{}: {} \u{2192} {}",
+                            "{} {}: {} \u{2192} {}",
                             d.name,
+                            if d.direction.is_input() { "in" } else { "out" },
                             crate::fmt::rate_bits(f.rate, f.bits),
                             crate::fmt::rate_bits(d.format.rate, d.format.bits)
                         ),
@@ -393,13 +430,17 @@ impl CoreAudio {
             for (kind, what) in changes {
                 self.log(now, kind, what);
             }
+            // Removals are reported once per device, not once per direction:
+            // unplugging one interface is one event however many scopes it had.
             let live: HashSet<&str> = devices.iter().map(|d| d.name.as_str()).collect();
-            let gone: Vec<String> = self
+            let mut gone: Vec<String> = self
                 .prev_devices
                 .iter()
-                .map(|(n, _, _)| n.clone())
+                .map(|((n, _), _)| n.clone())
                 .filter(|n| !live.contains(n.as_str()))
                 .collect();
+            gone.sort_unstable();
+            gone.dedup();
             for n in gone {
                 self.log(now, EventKind::DeviceRemoved, n);
             }
@@ -437,7 +478,7 @@ impl CoreAudio {
         }
 
         self.prev_devices =
-            devices.iter().map(|d| (d.name.clone(), d.format, d.is_alive)).collect();
+            devices.iter().map(|d| ((d.name.clone(), d.direction.is_input()), d.format)).collect();
         self.prev_default_out = default_out.map(|d| d.name.clone());
         self.prev_default_in = default_in.map(|d| d.name.clone());
     }
@@ -847,7 +888,12 @@ impl AudioBackend for CoreAudio {
     }
 
     fn set_input_metering(&mut self, on: bool) {
-        if on == self.metering.input {
+        // No early return on "no change": the caller's idea of the current
+        // state is not authoritative. The worker starts believing metering is
+        // off, so a session launched with --meter-input and then switched off
+        // in the menu used to be a no-op — leaving the capture stream open,
+        // and this process in the mic-in-use audit, while the menu said off.
+        if on && self.input.live().is_some() {
             return;
         }
         self.metering.input = on;
@@ -860,6 +906,14 @@ impl AudioBackend for CoreAudio {
             // process back out of the mic-in-use audit.
             Pending::Off
         };
+    }
+
+    fn set_window_len(&mut self, n: usize) {
+        self.window_len = n;
+    }
+
+    fn input_metering(&self) -> bool {
+        self.metering.input
     }
 
     fn audio(&mut self, want: crate::spectrum::Source) -> Option<Audio> {
