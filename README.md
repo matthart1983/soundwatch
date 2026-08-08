@@ -1,0 +1,281 @@
+# SoundWatch Lite
+
+A read-only audio diagnostics TUI. One screen at 80×24, five keys, four colours.
+
+Fourth member of the Lite family after NetWatch Lite, SysWatch Lite and DiskWatch
+Lite, and built to the `design_handoff_soundwatch` spec. It answers one question:
+**why does my audio sound wrong?**
+
+```
+ soundwatch  Mac · coreaudio                                   ● 48k/32 · 512fr
+
+ ⯈  -8.9 dBFS out                       peak -8.9  48k/32  MacBook Pro Speakers
+                                                                         ▄  ▄
+                                                                         █  █
+ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁█▄▁█▂▁
+ ⯇ -33.6 dBFS in                             peak -29.8  MacBook Pro Microphone
+
+ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▃▄▄▇▇█
+  60s ago ──────────────────────────────────────────────────────────────── now
+ rate 48k   buffer 512fr   latency 69.7ms   xruns 0                 all nominal
+ per-app levels are not reported by the CoreAudio HAL
+ APP             DEVICE                      LEVEL       RATE     LAT 60s
+ ──────────────────────────────────────────────────────────────────────────────
+ corespeechd     ● MacBook Pro Micropho         --     48k/32  41.7ms
+ afplay          MacBook Pro Speakers           --     48k/32  28.0ms
+ WebKit.GPU      MacBook Pro Speakers           --     48k/32  28.0ms
+```
+
+## Build and run
+
+Build with `make`, not `cargo build` — see [Consent](#consent-and-why-there-is-a-makefile)
+for why. Cargo alone produces a binary whose meters can never read anything.
+
+```sh
+make                  # release build, signed, ready to meter
+make run              # debug build, signed, run against the live audio stack
+make probe            # is metering actually receiving samples?
+make check            # what CI runs: fmt, clippy -D warnings, tests
+make install          # into /usr/local/bin
+
+cargo run -- --demo   # the design fixtures — touches no audio device at all
+```
+
+| flag | effect |
+|---|---|
+| `--demo` | drive the UI from the handoff's deterministic fixtures; opens nothing |
+| `--meter-input` | also meter the default input device (see [Input](#input-is-opt-in)) |
+| `--ascii` | ASCII stand-ins for glyphs that are not reliably single-width |
+| `--once <state>` | render `main`, `paused`, `filter`, `detail`, `alert` or `help` and exit |
+| `--no-color` | with `--once`, emit plain text |
+| `--probe-tap` | start the tap, watch it for five seconds, report what arrived |
+
+## Keys
+
+`q` quit · `p` pause · `/` filter · `↵` detail · `?` help · `↑↓` (or `j`/`k`)
+move the selection · `esc` close detail or clear the filter.
+
+## Read-only, by construction
+
+No volume, mute, routing or default changes. Nothing is ever written back to the
+audio system. Levels are observed, never recorded: no sample leaves the IOProc,
+nothing is written to disk, and the only state crossing out of the real-time
+thread is a single atomic peak.
+
+## Consent, and why there is a Makefile
+
+Output metering uses `AudioHardwareCreateProcessTap` (macOS 14.2+), the API Apple
+added so a program can observe the system mix without joining the graph. It does
+not alter routing, does not change what anyone hears, and does not run inside
+anyone else's callback. It is also gated on the `kTCCServiceAudioCapture`
+permission, and getting that permission is most of the work.
+
+**The failure mode has no error code.** Without consent the tap is created
+successfully, the aggregate device starts, the IOProc fires at exactly the right
+rate — and every sample is `0.0`, forever. That is indistinguishable from a quiet
+Mac unless you know to look. It is why the meters in this tool used to be flat.
+
+Two things are required, and each is useless without the other:
+
+1. **An identity.** A command-line tool has no bundle, so `build.rs` embeds
+   `Info.plist` into the binary's `__TEXT,__info_plist` section, giving it a
+   bundle identifier and the `NSAudioCaptureUsageDescription` string that TCC
+   insists on before it will display a dialog.
+
+2. **Responsibility.** TCC does not evaluate the process that made the call; it
+   evaluates the *responsible* process, which for anything launched from a shell
+   is the terminal emulator. Terminals do not ship an audio-capture usage
+   description, so `tccd` refuses even to prompt:
+
+   ```
+   Refusing authorization request for service kTCCServiceAudioCapture and subject
+   Sub:{com.mitchellh.ghostty} ... without NSAudioCaptureUsageDescription key
+   ```
+
+   So on startup the process re-executes itself with responsibility disclaimed
+   (`responsibility_spawnattrs_setdisclaim`, resolved by `dlsym` so a macOS that
+   drops it degrades instead of failing to launch). It then answers for its own
+   permissions, the dialog appears, and the grant is recorded against this
+   binary. See `src/tcc.rs`.
+
+And one build step: **cargo's output is linker-signed, and a linker signature
+does not bind the plist.** `codesign -dvv` reports `Info.plist=not bound` with an
+identifier derived from the filename, so TCC has nothing to prompt with. The
+Makefile re-signs after linking; that is the whole reason it exists. A binary
+built with plain `cargo build` reports the problem itself rather than metering
+silence:
+
+```
+$ cargo run -- --probe-tap
+signed as     : soundwatch_lite-54bd2326cce3536f
+this build is not signed with its Info.plist, so macOS cannot ask for audio
+consent — run `make` (or `codesign -f -s -` on the binary)
+```
+
+Ad-hoc signatures identify a binary by its code hash, so **every rebuild is a new
+identity and macOS asks again**. For daily use, sign with a stable certificate:
+
+```sh
+make SIGN_ID="Developer ID Application: Your Name (TEAMID)"
+```
+
+If the meters are flat, `make probe` separates the three cases: the IOProc never
+fired, it fired and delivered digital silence, or metering works. The running
+tool makes the same call on its own — a tap that has never seen a non-zero sample
+while apps are demonstrably playing to the default output says so on row 11
+rather than drawing a confident flat line.
+
+## Input is opt-in
+
+Output has a tap API whose entire purpose is observation without participation.
+Input has no equivalent: reading a microphone level means *being* a microphone
+client. The indicator comes on, the device may be started if nothing else is
+using it, and this process appears in the very mic-in-use audit the stream table
+exists to show — which it reports honestly rather than filtering itself out.
+
+That is a decision for the user, so it lives behind `--meter-input` and the input
+meter reads `--` until you ask for it. Microphone consent fails the same quiet
+way audio capture does, and is detected the same way: a capture stream that reads
+*exactly* zero for eight seconds is not a quiet room.
+
+## Platform support
+
+macOS only today, behind an `AudioBackend` trait sized for the rest of the family
+(PipeWire, PulseAudio, bare ALSA, JACK). A `Caps` struct declares what the active
+backend can actually report; the UI renders `--` plus one explanatory line for
+anything unavailable and never shifts the layout.
+
+**What works:** output levels, input levels with `--meter-input`, device names,
+sample rate, bit depth, channel count, buffer frame size, computed latency
+(device + stream latency + safety offset), running state, per-app streams with
+the mic-in-use marker, and xrun counts via a `kAudioDeviceProcessorOverload`
+listener.
+
+**What does not: per-app levels.** The HAL reports which processes are running
+audio, but no level for any of them, and the LEVEL column stays `--`. A process
+tap can be scoped to specific processes, so this is reachable — it needs one tap
+per process and an aggregate device rebuilt whenever the set changes, which is
+more churn in the system audio graph than a diagnostic tool should cause without
+being asked. Left for the full tool.
+
+Per-app streams need macOS 14 or newer (`kAudioHardwarePropertyProcessObjectList`).
+CoreAudio bindings are hand-rolled in `src/backend/ffi.rs` rather than pulled from
+`coreaudio-sys`, which would drag bindgen and libclang into the build and whose
+generated bindings predate the process-object API. Every selector was read out of
+the SDK headers.
+
+## Where this departs from the spec
+
+The handoff is marked "high-fidelity / spec-accurate — every glyph, column
+position, colour and label is final". These are the places that did not survive
+contact with real data, and what was done instead. Each is commented at the site.
+
+**"Never meter by tapping."** Said three times, and written against the old
+meaning of the word: instantiating an AudioUnit on the device, which puts work in
+the client's callback path and can perturb the very glitch you are observing. A
+process tap is not that. Without it both headline meters are dead on macOS, which
+makes the tool not worth opening.
+
+**Row 10 collides with itself.** `rate 48k · buffer 128fr · latency 11.8ms ·
+xruns 14` occupies columns 1–51 and the alert verdict `14 xruns · buffer too
+small` occupies 52–78 — zero gutter, in the mockup's own values. `rate 44.1k`,
+`xruns 147` or `latency 112.4ms` overlap outright. The vitals row now sheds its
+least load-bearing pair first (`rate`, which is already in the header).
+
+**Nothing outside the table was clipped.** The reference renderer's `drawText` is
+unbounded and its right-aligned `padL` keeps the *head* of an over-long string,
+so `44.1k→48k/24` renders as `44.1k→48k/`. Every write now goes through a
+`Field`, left-aligned text truncates from the right, and right-aligned *values*
+are re-formatted to fit rather than sliced — a truncated number is a wrong
+number. The header hostname and both meter-label device names have truncation
+rules they previously lacked; real device descriptions run past 40 characters.
+
+**60 samples cannot fill 78 columns.** `LITE.md` specifies a "60-sample-per-minute
+ring" for a 78-column chart labelled `60s ago → now`. The window is now 78 columns
+of 769 ms each, so it really is 60 seconds. The 60→9 sparkline reduction, which
+the spec never defines, is **max** — averaging a peak meter hides the transients
+the widget exists to show.
+
+**Silence was drawn two ways.** The spec's meter algorithm yields a blank column
+at the −60 dBFS floor while its sparkline algorithm yields `▁` for the same input.
+Both now draw the baseline; a genuinely blank meter means "no data".
+
+**One xrun is not an emergency.** `LITE.md` triggers the alert on "xruns in the
+last 60s" — literally one, which would paint the header red almost permanently and
+contradicts its own rule that healthy audio looks calm. The threshold is 3, and
+sustained clipping means 5 clipped columns, not one loud snare.
+
+**Red is not actually reserved.** The palette says red means "clipping at 0 dBFS,
+or xruns/dropouts. Nothing else", then paints `buffer`, `latency` and a stopped
+device red in the alert state. Resolved toward the broader rule the alert state
+needs: red means the audio is wrong right now.
+
+**Bit-depth conversion was invisible.** RATE encodes conversion as a rate-to-rate
+arrow only, so a 24→16 truncation at the same rate rendered as unremarkable dim
+text — despite the full tool calling it out with `insight_bit_depth_downgrade`.
+The column now shows `24→16` for that case.
+
+**The spec forgot some screens.** `?` is in the footer and in the five keys, and
+the README promises "an overlay that returns to the same screen", but no document
+says what it contains. There was also no key to move the selection — with eight
+rows, a fixed selection and `↵ detail`, streams past the eighth were unreachable —
+and no overflow story for a list that a normal desktop overruns. Added: the help
+panel, arrow/`j`/`k` selection with scrolling, and a `1-5 of 8` range indicator on
+the otherwise-blank row 22.
+
+**Filter had no exit and an ambiguous `↵`.** `/` now filters live with no
+selection tint (as specified); `↵` commits the query and returns to a selectable
+list; `esc` cancels. That resolves the collision with `↵ detail` on the same key.
+
+**`Instant` cannot be serialised.** `TECHNICAL.md` types every timestamp as
+`std::time::Instant`, including inside the `Tick` that snapshot/diff and
+`--record` write to disk. Lite does not record, but it shares the family's types,
+so the clock is wall-clock milliseconds from the start.
+
+**Glyphs.** `●` (U+25CF) is East-Asian-Ambiguous and renders double-width under
+some terminal configurations, which would shift the DEVICE column on every input
+row. `--ascii` swaps the risky glyphs; widths are computed as display widths
+throughout.
+
+Two spec details were also **wrong in the prose and right in the renderer**: the
+detail-state selection index (`LITE.md` says 1, `so-lite.jsx` uses 2 — neither is
+hardcoded here, the selection simply stays visible), and the input DEVICE field,
+which is 20 columns not 22 because the mic dot lives inside it.
+
+## Layout
+
+Rows and columns are the spec's, verbatim.
+
+```
+row  0  header        row  9  time axis      rows 12-13  table head + rule
+rows 2-5  output      row 10  vitals         rows 14-21  streams
+rows 6-8  input       row 11  degradation    row 22  filter / range
+                              note           row 23  footer
+```
+
+Table columns, identical across all four Lites: `1 / 17 / 40 / 51 / 62 / 70`.
+
+Terminals larger than 80×24 letterbox the canvas centred; smaller ones get an
+explicit message rather than a mangled layout.
+
+## Modules
+
+| module | responsibility |
+|---|---|
+| `grid.rs` | the clipping contract: `Field`, display-width truncation, glyph sets |
+| `fmt.rs` | width-aware value formatting; never truncates a number |
+| `meter.rs` | dB-space normalisation, block meters, sparklines, the 60s history ring |
+| `model.rs` | data model, `Caps`, and the alert rules |
+| `tcc.rs` | becoming our own TCC subject, so consent can be asked for at all |
+| `backend/ioproc.rs` | the real-time peak callback both meters attach through |
+| `backend/tap.rs` | the output process tap and its private aggregate device |
+| `backend/input.rs` | the opt-in capture stream behind the input meter |
+| `backend/ffi.rs` | hand-rolled CoreAudio HAL bindings |
+| `backend/coreaudio.rs` | the macOS backend, and what it will admit it cannot do |
+| `ui.rs` | the 80×24 screen and all six states |
+| `app.rs` | state machine, sampling, key handling |
+| `demo.rs` | the handoff's deterministic fixtures, behind the backend trait |
+
+## Licence
+
+MIT. See [LICENSE](LICENSE).

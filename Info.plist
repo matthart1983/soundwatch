@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Embedded into the __TEXT,__info_plist section of the binary by build.rs.
+
+  A command-line tool has no bundle, so without this section TCC has nothing to
+  identify it by and no string to put in the consent dialog. It attributes the
+  request to whichever terminal launched us, and then refuses even to prompt:
+
+      Refusing authorization request for service kTCCServiceAudioCapture and
+      subject Sub:{com.mitchellh.ghostty} ... without
+      NSAudioCaptureUsageDescription key
+
+  The tap is still created, and it still delivers digital silence forever. See
+  src/tcc.rs for the other half of the fix.
+-->
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>com.soundwatch.lite</string>
+	<key>CFBundleName</key>
+	<string>SoundWatch Lite</string>
+	<key>CFBundleExecutable</key>
+	<string>soundwatch-lite</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>SoundWatch Lite reads the level of the audio your Mac is playing so it can draw the output meter. Nothing is recorded, written to disk, or sent anywhere.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>SoundWatch Lite reads the level of your input device so it can draw the input meter. Nothing is recorded, written to disk, or sent anywhere.</string>
+</dict>
+</plist>

@@ -1,0 +1,37 @@
+[package]
+name = "soundwatch-lite"
+version = "0.1.0"
+edition = "2024"
+# edition 2024 needs a recent toolchain; let-chains need 1.88.
+rust-version = "1.88"
+description = "SoundWatch Lite — a read-only audio diagnostics TUI. One screen, five keys, four colors."
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/matthart1983/soundwatch"
+homepage = "https://github.com/matthart1983/soundwatch"
+keywords = ["audio", "coreaudio", "tui", "diagnostics", "metering"]
+categories = ["command-line-utilities", "multimedia::audio"]
+# Info.plist and build.rs are load-bearing: without them the binary cannot be
+# granted audio-capture consent and every meter reads silence. See src/tcc.rs.
+include = ["src/**/*", "build.rs", "Info.plist", "README.md", "LICENSE"]
+
+[[bin]]
+name = "soundwatch-lite"
+path = "src/main.rs"
+
+[dependencies]
+crossterm = "0.29.0"
+ratatui = "0.30.2"
+unicode-width = "0.2.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# posix_spawn and dlsym, for the TCC re-exec in src/tcc.rs. Already in the tree
+# under crossterm; taking it directly keeps that FFI honestly typed.
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

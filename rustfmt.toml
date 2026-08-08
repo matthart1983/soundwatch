@@ -1,0 +1,10 @@
+# The codebase was written in a compact style that stock rustfmt disagrees
+# with: short struct literals, short if/else and short calls stay on one line.
+# `Max` tells the width heuristics to allow anything that fits inside
+# max_width, which is what the code already does — so this file is a
+# description of the existing style, not a change to it.
+#
+# Without it, `cargo fmt` rewrites roughly every file on first run and the
+# project can never be fmt-clean in CI.
+use_small_heuristics = "Max"
+style_edition = "2024"

@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    # macOS only, and it has to be a real one: several tests read the actual
+    # CoreAudio HAL — device lists, channel counts, computed latency. They are
+    # the tests that would have caught the FFI drift that broke metering.
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test
+
+      # A CI runner has no logged-in user to answer a consent dialog, so the
+      # tap will never deliver samples here. What can be checked is that the
+      # binary is built the way consent requires: the Info.plist section must
+      # be present and the signature must bind it. Getting this wrong is
+      # invisible at runtime — the meters just read zero forever.
+      - name: Build and sign
+        run: make build
+
+      - name: Signature carries the Info.plist
+        run: |
+          codesign -dvv target/release/soundwatch-lite 2>&1 | tee /tmp/sig
+          grep -q 'Identifier=com.soundwatch.lite' /tmp/sig \
+            || { echo "::error::signature does not carry the bundle identifier"; exit 1; }
+          grep -q 'Info.plist entries=' /tmp/sig \
+            || { echo "::error::Info.plist is not bound; TCC cannot prompt"; exit 1; }
+
+      - name: Renders without a terminal
+        run: |
+          for state in main paused filter detail help; do
+            ./target/release/soundwatch-lite --once "$state" --no-color > /dev/null
+          done
+          ./target/release/soundwatch-lite --demo --once alert --no-color > /dev/null
