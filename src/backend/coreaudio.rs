@@ -109,6 +109,9 @@ pub struct CoreAudio {
     /// property read is IPC, and this one runs twenty times a second.
     last_out: Option<Device>,
     last_in: Option<Device>,
+    /// Samples the spectrum wants per window. Configurable, so it cannot be
+    /// read off a constant.
+    window_len: usize,
 }
 
 /// How long a tap may read pure silence before that becomes suspicious. Long
@@ -159,6 +162,7 @@ impl CoreAudio {
             output_is_busy: false,
             last_out: None,
             last_in: None,
+            window_len: crate::dsp::FFT_SIZE,
         }
     }
 
@@ -611,6 +615,22 @@ impl AudioBackend for CoreAudio {
         }
     }
 
+    fn set_input_metering(&mut self, on: bool) {
+        if on == self.metering.input {
+            return;
+        }
+        self.metering.input = on;
+        self.last_input_attempt = None;
+        self.input = if on {
+            Pending::spawn(super::input::InputMeter::start)
+        } else {
+            // Dropping the meter stops and detaches the IOProc, which also
+            // releases the device if we were its only client — and takes this
+            // process back out of the mic-in-use audit.
+            Pending::Off
+        };
+    }
+
     fn audio(&mut self, want: crate::spectrum::Source) -> Option<Audio> {
         use crate::spectrum::Source;
         let rate = |d: &Option<Device>| d.as_ref().map(|d| d.format.rate).unwrap_or(48_000);
@@ -618,11 +638,11 @@ impl AudioBackend for CoreAudio {
             Source::Off => return None,
             Source::Output => {
                 let t = self.tap.live()?;
-                (t.recent(crate::dsp::FFT_SIZE)?, rate(&self.last_out), t.overruns())
+                (t.recent(self.window_len)?, rate(&self.last_out), t.overruns())
             }
             Source::Input => {
                 let m = self.input.live()?;
-                (m.recent(crate::dsp::FFT_SIZE)?, rate(&self.last_in), m.overruns())
+                (m.recent(self.window_len)?, rate(&self.last_in), m.overruns())
             }
         };
         Some(Audio { source: want, samples, rate, overruns })

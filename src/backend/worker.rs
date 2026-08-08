@@ -76,6 +76,8 @@ pub struct BackendWorker {
     rx: Receiver<Update>,
     stop: Arc<AtomicBool>,
     wants: Wants,
+    /// Whether the settings menu currently wants the input meter open.
+    input: Arc<AtomicBool>,
 }
 
 impl BackendWorker {
@@ -86,6 +88,8 @@ impl BackendWorker {
         let flag = stop.clone();
         let wants = Wants::default();
         let asked = wants.clone();
+        let input = Arc::new(AtomicBool::new(false));
+        let want_input = input.clone();
 
         let spawned = std::thread::Builder::new()
             .name("soundwatch-backend".into())
@@ -98,6 +102,7 @@ impl BackendWorker {
                     return;
                 }
                 let mut last_tick = Instant::now();
+                let mut input_on = false;
                 loop {
                     std::thread::sleep(crate::app::SAMPLE_INTERVAL);
                     if flag.load(Ordering::Relaxed) {
@@ -105,6 +110,13 @@ impl BackendWorker {
                     }
                     if !send(&tx, Update::Levels(backend.levels())) {
                         return;
+                    }
+                    // Opening a capture stream can block on a consent dialog,
+                    // which is exactly why it happens on this thread.
+                    let want_in = want_input.load(Ordering::Relaxed);
+                    if want_in != input_on {
+                        input_on = want_in;
+                        backend.set_input_metering(want_in);
                     }
                     let want = asked.get();
                     if want.is_on()
@@ -126,7 +138,12 @@ impl BackendWorker {
         if !spawned {
             stop.store(true, Ordering::Relaxed);
         }
-        Self { rx, stop, wants }
+        Self { rx, stop, wants, input }
+    }
+
+    /// Ask the backend to open or close the input meter.
+    pub fn want_input_meter(&self, on: bool) {
+        self.input.store(on, Ordering::Relaxed);
     }
 
     /// Tell the backend which signal the spectrum screen wants, if any.

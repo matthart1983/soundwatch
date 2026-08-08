@@ -137,6 +137,13 @@ pub trait AudioBackend: Send {
     /// that is not live — not yet open, unavailable, or never asked for.
     fn levels(&mut self) -> Levels;
 
+    /// Start or stop the input meter while running.
+    ///
+    /// The settings menu can turn input metering on, and a menu whose switches
+    /// only take effect at the next launch is a configuration file with extra
+    /// steps. Default is a no-op for backends with nothing to open.
+    fn set_input_metering(&mut self, _on: bool) {}
+
     /// A window of audio for the spectrum, when one is being asked for.
     ///
     /// Separate from `levels` because it is only collected while the spectrum

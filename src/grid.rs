@@ -86,6 +86,8 @@ pub struct Glyphs {
     pub arrow: &'static str,
     pub enter: &'static str,
     pub updown: &'static str,
+    /// Marks the selected row in the settings menu.
+    pub sel: &'static str,
     pub blocks: [char; 8],
     /// Box drawing for the help panel: horizontal, vertical, then the four
     /// corners clockwise from top-left.
@@ -104,6 +106,7 @@ pub const UNICODE: Glyphs = Glyphs {
     arrow: "\u{2192}",
     enter: "\u{21B5}",
     updown: "\u{2191}\u{2193}",
+    sel: "\u{203a}",
     blocks: ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'],
     box_chars: ['─', '│', '┌', '┐', '┘', '└'],
 };
@@ -119,6 +122,7 @@ pub const ASCII: Glyphs = Glyphs {
     arrow: ">",
     enter: "e",
     updown: "^v",
+    sel: ">",
     blocks: ['_', '.', '.', '-', '-', '=', '=', '#'],
     box_chars: ['-', '|', '+', '+', '+', '+'],
 };

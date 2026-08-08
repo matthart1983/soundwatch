@@ -56,6 +56,9 @@ pub fn render(app: &App, buf: &mut Buffer, area: Rect) {
     if app.mode == Mode::Help {
         help(&mut c, &l, app);
     }
+    if app.mode == Mode::Settings {
+        settings(&mut c, &l, app);
+    }
 }
 
 fn too_small(buf: &mut Buffer, area: Rect) {
@@ -256,7 +259,8 @@ fn meter_body(c: &mut Canvas, l: &Layout, app: &App, v: MeterView) {
     let cols = l.content.width();
     let sub = app.sub_columns();
     let series = hist.columns(cols as usize * sub);
-    let norm: Vec<f32> = series.iter().map(|d| meter::norm(*d)).collect();
+    let floor = app.cfg.meter_floor;
+    let norm: Vec<f32> = series.iter().map(|d| meter::norm(*d, floor)).collect();
     let grid = chart::bars(&norm, cols, h, sub == 2, &blocks);
 
     for (y, row) in grid.iter().enumerate() {
@@ -272,7 +276,7 @@ fn meter_body(c: &mut Canvas, l: &Layout, app: &App, v: MeterView) {
             let fg = if app.paused {
                 theme::FAINT
             } else {
-                theme::chart_cell(app.theme, base, d, height)
+                theme::chart_cell(app.theme(), base, d, height)
             };
             c.set(l.content.x0 + x as u16, top + h - 1 - y as u16, *ch, fg);
         }
@@ -458,7 +462,12 @@ fn stream_row(c: &mut Canvas, l: &Layout, app: &App, y: u16, s: &Stream, selecte
     if let Some(h) = app.history_for(&s.key).filter(|h| h.has_data()) {
         let cells = h.columns(l.f_spark.width() as usize);
         for (i, d) in cells.iter().enumerate() {
-            c.set(l.f_spark.x0 + i as u16, y, meter::spark(*d, &c.g.blocks), spark_fg);
+            c.set(
+                l.f_spark.x0 + i as u16,
+                y,
+                meter::spark(*d, &c.g.blocks, app.cfg.meter_floor),
+                spark_fg,
+            );
         }
     }
 }
@@ -569,48 +578,55 @@ fn prompt(c: &mut Canvas, l: &Layout, app: &App) {
 // ── row 23 ───────────────────────────────────────────────────────────────────
 
 fn footer(c: &mut Canvas, l: &Layout, app: &App) {
-    let keys: &[(&str, &str)] = if app.mode == Mode::Filter {
+    let all: &[(&str, &str)] = if app.mode == Mode::Filter {
         &[("\u{21B5}", "apply"), ("esc", "cancel")]
     } else {
         &[
             ("q", "quit"),
             ("p", "pause"),
             ("s", "spectrum"),
+            (",", "settings"),
             ("/", "filter"),
             ("\u{21B5}", "detail"),
             ("?", "help"),
         ]
     };
 
-    // Six keys and the full version string overflow 80 columns by five, and
-    // the spec puts both on this row. The version is the compressible one — a
-    // bare number still answers "which build is this?" — so it sheds its name
-    // before any key is dropped. Keys are shed only if even that is not
-    // enough, from the right, where the least-used ones are.
-    let keys_w: u16 = keys.iter().map(|(k, v)| width(k) + 1 + width(v)).sum::<u16>()
-        + 3 * (keys.len() as u16 - 1);
-    let version = if keys_w + 2 + width(VERSION) <= l.content.width() {
-        Some(VERSION)
-    } else if keys_w + 2 + width(SHORT_VERSION) <= l.content.width() {
-        Some(SHORT_VERSION)
-    } else {
-        None
+    // Seven keys and a version string do not fit 80 columns, and the spec puts
+    // both on this row. Two things give way in order: the version drops its
+    // name to a bare number (which still answers "which build is this?"), and
+    // then keys are shed — from the *second* to last, never the last, because
+    // the last one is `?` and it is the key that explains all the others. A
+    // footer that has quietly dropped `? help` is a tool with no way in.
+    let width_of = |ks: &[(&str, &str)]| -> u16 {
+        if ks.is_empty() {
+            return 0;
+        }
+        ks.iter().map(|(k, v)| width(k) + 1 + width(v)).sum::<u16>() + 3 * (ks.len() as u16 - 1)
     };
+
+    let mut keys: Vec<(&str, &str)> = all.to_vec();
+    let mut version = Some(VERSION);
+    let fits = |keys: &[(&str, &str)], v: Option<&str>| {
+        width_of(keys) + v.map(|v| 2 + width(v)).unwrap_or(0) <= l.content.width()
+    };
+    if !fits(&keys, version) {
+        version = Some(SHORT_VERSION);
+    }
+    while !fits(&keys, version) && keys.len() > 1 {
+        keys.remove(keys.len() - 2);
+    }
+
     let field = match version {
         Some(v) => l.content.ending_before(l.content.x1 + 2 - width(v), 2),
         None => l.content,
     };
-
     let mut x = l.content.x0;
     for (i, (k, label)) in keys.iter().enumerate() {
-        let key = if *k == "\u{21B5}" { c.g.enter } else { k };
-        let need = width(key) + 1 + width(label) + if i > 0 { 3 } else { 0 };
-        if x + need > field.x1 + 1 {
-            break;
-        }
         if i > 0 {
             x += 3;
         }
+        let key = if *k == "\u{21B5}" { c.g.enter } else { k };
         x = c.text(field, x, l.row_footer, key, theme::CYAN, true);
         x = c.text(field, x, l.row_footer, &format!(" {label}"), theme::DIM, false);
     }
@@ -639,8 +655,8 @@ fn spectrum(c: &mut Canvas, l: &Layout, app: &App) {
     let detail = if rate > 0 {
         format!(
             "   {}pt hann   {:.1} Hz/bin",
-            crate::dsp::FFT_SIZE,
-            rate as f32 / crate::dsp::FFT_SIZE as f32
+            sp.window_len(),
+            rate as f32 / sp.window_len() as f32
         )
     } else {
         "   waiting for audio".into()
@@ -671,7 +687,8 @@ fn spectrum(c: &mut Canvas, l: &Layout, app: &App) {
         let blocks = c.g.blocks;
         let sub = app.sub_columns();
         let cells = l.content.width();
-        let norm: Vec<f32> = cols.iter().map(|col| crate::spectrum::norm(col.level)).collect();
+        let norm: Vec<f32> =
+            cols.iter().map(|col| crate::spectrum::norm(col.level, sp.floor())).collect();
         let grid = chart::bars(&norm, cells, rows, sub == 2, &blocks);
 
         for (y, row) in grid.iter().enumerate() {
@@ -685,7 +702,7 @@ fn spectrum(c: &mut Canvas, l: &Layout, app: &App) {
                 let fg = if app.paused {
                     theme::FAINT
                 } else {
-                    theme::chart_cell(app.theme, base, d, height)
+                    theme::chart_cell(app.theme(), base, d, height)
                 };
                 c.set(l.content.x0 + x as u16, top + rows - 1 - y as u16, *ch, fg);
             }
@@ -697,7 +714,7 @@ fn spectrum(c: &mut Canvas, l: &Layout, app: &App) {
             let hold = chunk.iter().map(|c| c.hold).fold(f32::NEG_INFINITY, f32::max);
             let level = chunk.iter().map(|c| c.level).fold(f32::NEG_INFINITY, f32::max);
             if hold > level + 1.0 {
-                let hcell = (crate::spectrum::norm(hold) * rows as f32).round() as u16;
+                let hcell = (crate::spectrum::norm(hold, sp.floor()) * rows as f32).round() as u16;
                 if hcell > 0 && hcell <= rows {
                     // Match the glyph family the bars are drawn in, or the cap
                     // sits a pixel low and reads as a different kind of mark.
@@ -746,6 +763,79 @@ fn spectrum(c: &mut Canvas, l: &Layout, app: &App) {
     }
 }
 
+// ── the settings menu ────────────────────────────────────────────────────────
+
+/// Everything the tool can be told to do differently, on one screen.
+///
+/// Values are shown, not hidden behind a submenu: the point of a settings
+/// screen in a diagnostic tool is to answer "what is this thing currently
+/// doing?" as much as to change it. Each row carries one line saying what the
+/// setting *costs*, because every one of these is a trade and none of them has
+/// a right answer.
+fn settings(c: &mut Canvas, l: &Layout, app: &App) {
+    use crate::config::Setting;
+
+    let rows = Setting::ALL.len() as u16;
+    let sections = Setting::ALL.iter().filter(|s| s.section().is_some()).count() as u16;
+    // Two borders, one row per setting, one per heading, a blank, the note for
+    // the selected row, and the key hints.
+    let panel_h = (rows + sections + 5).min(l.h.saturating_sub(2));
+    let panel_w = 64u16.min(l.content.width());
+    let x0 = l.content.x0 + (l.content.width().saturating_sub(panel_w)) / 2;
+    let outer = Field::at(x0, panel_w);
+    let y0 = (l.h.saturating_sub(panel_h)) / 2;
+    let y1 = y0 + panel_h - 1;
+    c.panel(outer, y0, y1, theme::FAINT, theme::BG);
+    c.text(outer, outer.x0 + 2, y0, " settings ", theme::FG, true);
+
+    let inner = Field::new(outer.x0 + 2, outer.x1 - 2);
+    let value_x = inner.x1.saturating_sub(15);
+    let mut y = y0 + 1;
+
+    for (i, s) in Setting::ALL.iter().enumerate() {
+        if y >= y1 - 2 {
+            break;
+        }
+        if let Some(section) = s.section() {
+            c.text(inner, inner.x0, y, section, theme::DIM, true);
+            y += 1;
+        }
+        let selected = i == app.setting;
+        if selected {
+            c.tint(Field::new(inner.x0 - 1, inner.x1 + 1), y, theme::SEL_BG);
+            // A marker as well as the tint: the selection has to be findable
+            // in a screenshot, over SSH to a terminal with no colour, and by
+            // anyone who cannot pick a dark blue background out of a dark one.
+            c.text(inner, inner.x0, y, c.g.sel, theme::CYAN, true);
+        }
+        let label_fg = if selected { theme::FG } else { theme::DIM };
+        c.text(inner, inner.x0 + 2, y, s.label(), label_fg, selected);
+        // Values are right-aligned in their own column so the eye can run down
+        // them; a changed setting is the one thing you want to spot instantly.
+        let value_fg = if selected { theme::CYAN } else { theme::FG };
+        c.right(Field::new(value_x, inner.x1), y, &s.value(&app.cfg), value_fg);
+        y += 1;
+    }
+
+    // The selected row's explanation, on its own line rather than crammed
+    // beside the value, because these are sentences.
+    let note_y = y1 - 2;
+    if let Some(s) = Setting::ALL.get(app.setting) {
+        c.left(inner, note_y, s.note(), theme::FAINT);
+    }
+
+    let footer = match &app.save_status {
+        Some(msg) => msg.clone(),
+        None => {
+            let keys =
+                "\u{2191}\u{2193} choose   \u{2190}\u{2192} change   w write   r reset   esc close";
+            keys.into()
+        }
+    };
+    let fg = if app.save_status.is_some() { theme::YELLOW } else { theme::DIM };
+    c.left(inner, y1 - 1, crate::grid::truncate(&footer, inner.width()), fg);
+}
+
 // ── the help overlay ─────────────────────────────────────────────────────────
 
 /// `?` is in the footer, in the five keys, and promised by the handoff README as
@@ -770,6 +860,7 @@ fn help(c: &mut Canvas, l: &Layout, app: &App) {
         ("q", "quit"),
         ("p", "pause \u{2014} freezes the meters and peak holds"),
         ("s", "spectrum \u{2014} cycles output, input, off"),
+        (",", "settings \u{2014} themes, floors, ballistics, and saving them"),
         ("/", "filter by app or device name"),
         (c.g.enter, "expand the selected stream"),
         (c.g.updown, "move the selection (j and k also work)"),
@@ -789,7 +880,7 @@ fn help(c: &mut Canvas, l: &Layout, app: &App) {
     // bar's height and means nothing on its own. Printing the spec legend
     // under the btop theme would be a lie on the one screen whose job is to
     // explain the screen.
-    let legend: &[(&str, Color, &str)] = match app.theme {
+    let legend: &[(&str, Color, &str)] = match app.theme() {
         theme::Theme::Spec => &[
             ("green", theme::GREEN, "output / playback path"),
             ("cyan", theme::CYAN, "input / capture path"),
@@ -813,7 +904,7 @@ fn help(c: &mut Canvas, l: &Layout, app: &App) {
     let last = app.snap.caps.note.clone().unwrap_or_else(|| {
         format!(
             "read-only \u{b7} theme {} \u{b7} nothing here changes your audio",
-            app.theme.name()
+            app.theme().name()
         )
     });
     c.left(inner, y, &last, theme::FAINT);

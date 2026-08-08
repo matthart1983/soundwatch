@@ -16,6 +16,7 @@
 mod app;
 mod backend;
 mod chart;
+mod config;
 mod demo;
 mod dsp;
 mod fmt;
@@ -67,51 +68,56 @@ OPTIONS:
                       single-width in every terminal. Forces blocks over
                       braille, whatever the theme asks for.
     --once <STATE>    render one frame to stdout and exit. STATE is one of
-                      main, paused, filter, detail, alert, help, spectrum
+                      main, paused, filter, detail, alert, help, spectrum,
+                      settings
     --no-color        with --once, emit plain text
     --probe-tap       start the output tap, watch it for five seconds, and
                       report whether real samples arrive. Use this first when
                       the meters look flat.
+    --defaults        ignore the saved settings for this run
+
+SETTINGS:
+    `,` opens a menu for everything above and rather more: meter and spectrum
+    floors, analysis size, bar ballistics, the xrun alert threshold and the
+    refresh rate. `w` writes them to
+    $XDG_CONFIG_HOME/soundwatch/config.toml (or ~/.config/...), `r` resets.
+    Flags override the saved file for one run without editing it.
     -h, --help        this message
     -V, --version     print version
 
 KEYS:
-    q quit    p pause    s spectrum    / filter    enter detail    ? help
+    q quit    p pause    s spectrum    , settings    / filter
+    enter detail    ? help
     up/down (or j/k) move the selection    esc close detail or clear filter
 ";
 
 struct Args {
     demo: bool,
-    ascii: bool,
     once: Option<String>,
     color: bool,
     probe: bool,
-    meter_input: bool,
-    theme: theme::Theme,
+    /// Settings, loaded from disk and then overridden by whatever flags were
+    /// passed. A flag is a one-run override, not an edit to the saved config —
+    /// only the `,` menu's `w` writes the file.
+    cfg: config::Config,
 }
 
 fn parse_args() -> Result<Args, String> {
-    let mut a = Args {
-        demo: false,
-        ascii: false,
-        once: None,
-        color: true,
-        probe: false,
-        meter_input: false,
-        theme: theme::Theme::default(),
-    };
+    let mut a =
+        Args { demo: false, once: None, color: true, probe: false, cfg: config::Config::load() };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--probe-tap" => a.probe = true,
-            "--meter-input" => a.meter_input = true,
+            "--meter-input" => a.cfg.meter_input = true,
             "--theme" => {
                 let name = it.next().ok_or("--theme needs a name")?;
-                a.theme = theme::Theme::parse(&name)
+                a.cfg.theme = theme::Theme::parse(&name)
                     .ok_or_else(|| format!("unknown theme: {name} (try spec or btop)"))?;
             }
+            "--defaults" => a.cfg = config::Config::default(),
             "--demo" => a.demo = true,
-            "--ascii" => a.ascii = true,
+            "--ascii" => a.cfg.ascii = true,
             "--no-color" => a.color = false,
             "--once" => {
                 a.once = Some(it.next().ok_or("--once needs a state")?);
@@ -161,7 +167,7 @@ fn main() {
     // --demo drives the fixtures and must not open, tap or even enumerate a
     // real device: it is the state you fall back to when consent is refused.
     if args.demo {
-        let mut app = App::demo(args.ascii, args.theme);
+        let mut app = App::demo(args.cfg);
         if let Some(state) = args.once {
             return once(&mut app, &state, args.color);
         }
@@ -173,13 +179,13 @@ fn main() {
     }
 
     let metering =
-        backend::Metering { output: wants_metering, input: wants_metering && args.meter_input };
+        backend::Metering { output: wants_metering, input: wants_metering && args.cfg.meter_input };
 
     // --once is a one-shot render, so it reads the backend synchronously: there
     // is no UI to keep responsive and no second frame to wait for.
     if let Some(state) = args.once {
         let mut be = CoreAudio::new(metering);
-        let mut app = App::snapshot_only(be.snapshot(), args.ascii, args.theme);
+        let mut app = App::snapshot_only(be.snapshot(), args.cfg);
         return once(&mut app, &state, args.color);
     }
 
@@ -188,13 +194,8 @@ fn main() {
     let be = CoreAudio::new(metering);
     let name = be.name();
     let host = backend::ffi::hostname();
-    let mut app = App::live(
-        backend::worker::BackendWorker::spawn(Box::new(be)),
-        name,
-        host,
-        args.ascii,
-        args.theme,
-    );
+    let mut app =
+        App::live(backend::worker::BackendWorker::spawn(Box::new(be)), name, host, args.cfg);
 
     if let Err(e) = run(&mut app) {
         eprintln!("soundwatch-lite: {e}");
@@ -317,7 +318,7 @@ fn run(app: &mut App) -> io::Result<()> {
         // Poll for the sampling interval, so input stays responsive without
         // spinning. Repaint therefore tops out at 20 fps, comfortably inside the
         // family's 30 fps coalescing budget.
-        match event::poll(app::SAMPLE_INTERVAL) {
+        match event::poll(Duration::from_millis(1000 / app.cfg.refresh_hz.max(1))) {
             Ok(true) => match event::read() {
                 Ok(Event::Key(k)) if k.kind == KeyEventKind::Press => app.on_key(k),
                 Ok(_) => {}
@@ -368,6 +369,7 @@ fn render_once_at(
         "paused" => app.on_key(press(KeyCode::Char('p'))),
         "detail" => app.on_key(press(KeyCode::Enter)),
         "help" => app.on_key(press(KeyCode::Char('?'))),
+        "settings" => app.on_key(press(KeyCode::Char(','))),
         "spectrum" => {
             app.on_key(press(KeyCode::Char('s')));
             if app.demo {
@@ -445,7 +447,7 @@ mod tests {
     }
 
     fn frame_themed(state: &str, w: u16, h: u16, th: theme::Theme) -> Vec<String> {
-        let mut app = App::demo(false, th);
+        let mut app = App::demo(config::Config { theme: th, ..Default::default() });
         let s = render_once_at(&mut app, state, false, w, h).expect("render");
         s.lines().map(str::to_owned).collect()
     }
@@ -453,6 +455,9 @@ mod tests {
     /// Sizes worth checking: the spec's minimum, one column and one row above
     /// it (where the surplus-sharing arithmetic first does anything), an
     /// awkward prime-ish size, and a plausible full screen.
+    const STATES: [&str; 8] =
+        ["main", "paused", "filter", "detail", "alert", "help", "spectrum", "settings"];
+
     const SIZES: &[(u16, u16)] =
         &[(80, 24), (81, 25), (97, 31), (120, 40), (160, 50), (203, 61), (300, 80)];
 
@@ -477,7 +482,7 @@ mod tests {
 
     #[test]
     fn every_state_fits_the_grid() {
-        for state in ["main", "paused", "filter", "detail", "alert", "help", "spectrum"] {
+        for state in STATES {
             assert_within_grid(&frame(state));
         }
     }
@@ -487,7 +492,7 @@ mod tests {
     #[test]
     fn every_state_fits_every_terminal_size() {
         for &(w, h) in SIZES {
-            for state in ["main", "paused", "filter", "detail", "alert", "help", "spectrum"] {
+            for state in STATES {
                 assert_grid(&frame_at(state, w, h), w, h);
             }
         }
@@ -519,7 +524,7 @@ mod tests {
     /// A crowded list, which is the normal case on a desktop and the one the
     /// eight-row fixture never exercises.
     fn crowded_frame_at(w: u16, h: u16) -> Vec<String> {
-        let mut app = App::demo(false, theme::Theme::default());
+        let mut app = App::demo(config::Config::default());
         let template = app.snap.streams[0].clone();
         for i in 0..40 {
             let mut s = template.clone();
@@ -682,11 +687,61 @@ mod tests {
     /// and braille is a far riskier bet than the block elements.
     #[test]
     fn ascii_overrides_the_braille_theme() {
-        let mut app = App::demo(true, theme::Theme::Btop);
+        let mut app = App::demo(config::Config {
+            ascii: true,
+            theme: theme::Theme::Btop,
+            ..Default::default()
+        });
         let s = render_once_at(&mut app, "spectrum", false, 120, 40).expect("render");
         assert!(
             !s.chars().any(|c| ('\u{2800}'..'\u{2900}').contains(&c)),
             "--ascii still drew braille"
+        );
+    }
+
+    /// The menu has to show every setting it claims to, with a value beside
+    /// each, and it has to say how to work it.
+    #[test]
+    fn the_settings_menu_lists_every_setting_with_its_value() {
+        for &(w, h) in SIZES {
+            let f = frame_at("settings", w, h);
+            let joined = f.join("\n");
+            for s in crate::config::Setting::ALL {
+                assert!(joined.contains(s.label()), "{w}x{h}: no row for {:?}", s);
+                assert!(
+                    joined.contains(&s.value(&crate::config::Config::default())),
+                    "{w}x{h}: no value shown for {:?}",
+                    s
+                );
+            }
+            assert!(joined.contains("w write"), "{w}x{h}: the menu does not say how to save");
+            assert!(joined.contains("settings"), "{w}x{h}: the panel has no title");
+        }
+    }
+
+    /// And changing a setting in the menu has to change the screen behind it.
+    #[test]
+    fn changing_a_setting_in_the_menu_takes_effect() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let press = |c: KeyCode| KeyEvent::new(c, KeyModifiers::NONE);
+
+        let mut app = App::demo(config::Config::default());
+        app.set_viewport(120, 40);
+        let before = render_once_at(&mut app, "main", false, 120, 40).expect("render");
+
+        // Open the menu, land on `theme`, and step it.
+        app.on_key(press(KeyCode::Char(',')));
+        assert_eq!(app.mode, crate::app::Mode::Settings);
+        app.on_key(press(KeyCode::Right));
+        assert_eq!(app.cfg.theme, theme::Theme::Btop, "the first row is not the theme");
+        app.on_key(press(KeyCode::Esc));
+        assert_eq!(app.mode, crate::app::Mode::Main, "esc did not close the menu");
+
+        let after = render_once_at(&mut app, "main", false, 120, 40).expect("render");
+        assert_ne!(before, after, "the setting changed nothing on screen");
+        assert!(
+            after.chars().any(|c| ('\u{2800}'..'\u{2900}').contains(&c)),
+            "the theme change did not reach the charts"
         );
     }
 

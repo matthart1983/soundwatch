@@ -14,17 +14,18 @@
 //! the same reason `XRUN_ALERT_THRESHOLD` exists: a row that flickers
 //! accusations is a row people learn to ignore.
 
+use crate::config::Config;
 use crate::dsp::{Analysis, Analyzer, FLOOR_DBFS};
 
 /// Lowest frequency the axis shows. Below this is subsonic for every purpose
 /// this screen serves, and it would spend columns on nothing.
 pub const MIN_HZ: f32 = 20.0;
 
-/// Fast attack, slow decay, in dB per second. Conventional analyser
-/// ballistics: a transient must appear on the frame it happens, and the fall
-/// has to be slow enough to read.
+/// Default fall, in dB per second. Conventional analyser ballistics: a
+/// transient must appear on the frame it happens, and the fall has to be slow
+/// enough to read. Configurable; see [`crate::config::Config`].
 pub const DECAY_DB_PER_SEC: f32 = 20.0;
-/// How long a peak marker holds before it starts falling.
+/// Default hold before a peak marker starts falling. Configurable.
 pub const PEAK_HOLD_SECS: f32 = 1.5;
 /// And how fast it falls once it lets go.
 pub const PEAK_FALL_DB_PER_SEC: f32 = 12.0;
@@ -105,11 +106,8 @@ impl Axis {
 /// The meters have their own at [`crate::meter::norm`] with a -60 dBFS floor.
 /// Sharing one would put most real content in the bottom two rows here; see
 /// [`FLOOR_DBFS`].
-pub fn norm(dbfs: f32) -> f32 {
-    if !dbfs.is_finite() {
-        return 0.0;
-    }
-    ((dbfs - FLOOR_DBFS) / -FLOOR_DBFS).clamp(0.0, 1.0)
+pub fn norm(dbfs: f32, floor: f32) -> f32 {
+    crate::meter::norm(dbfs, floor)
 }
 
 /// One column of the graph.
@@ -140,6 +138,10 @@ pub struct Spectrum {
     hum_excess: f32,
     /// Windows lost to the real-time callback lapping the reader.
     overruns: u64,
+    /// Ballistics and scale, from the settings menu.
+    decay: f32,
+    hold: f32,
+    floor: f32,
 }
 
 impl Default for Spectrum {
@@ -152,7 +154,7 @@ impl Spectrum {
     pub fn new() -> Self {
         Self {
             source: Source::Off,
-            analyzer: Analyzer::new(),
+            analyzer: Analyzer::default(),
             latest: None,
             columns: Vec::new(),
             hold_age: Vec::new(),
@@ -163,7 +165,40 @@ impl Spectrum {
             hum_hz: 0.0,
             hum_excess: 0.0,
             overruns: 0,
+            decay: DECAY_DB_PER_SEC,
+            hold: PEAK_HOLD_SECS,
+            floor: FLOOR_DBFS,
         }
+    }
+
+    /// Adopt the settings menu's values.
+    ///
+    /// Rebuilds the transform only when its shape actually changed: `configure`
+    /// runs on every frame, and reallocating a 8192-point window twenty times a
+    /// second to arrive at the same numbers would be a waste with a visible
+    /// stutter attached.
+    pub fn configure(&mut self, cfg: &Config) {
+        self.decay = cfg.spectrum_decay;
+        self.hold = cfg.peak_hold;
+        if self.analyzer.size() != cfg.fft_size || self.analyzer.floor() != cfg.spectrum_floor {
+            self.analyzer = Analyzer::new(cfg.fft_size, cfg.spectrum_floor);
+            self.floor = self.analyzer.floor();
+            // The old bins were measured on a different scale; keeping them
+            // would draw one signal against another's floor for a frame.
+            self.latest = None;
+            self.columns.clear();
+            self.hold_age.clear();
+        }
+    }
+
+    /// How many samples a window needs, so the backend can fetch the right
+    /// number rather than assuming the default size.
+    pub fn window_len(&self) -> usize {
+        self.analyzer.size()
+    }
+
+    pub fn floor(&self) -> f32 {
+        self.floor
     }
 
     /// Forget everything measured. Called when the source changes, so one
@@ -217,7 +252,7 @@ impl Spectrum {
     /// Advance the ballistics with no new audio: the meters fall rather than
     /// freezing when the signal stops arriving.
     pub fn idle(&mut self, dt: f32) {
-        let raw: Vec<f32> = vec![FLOOR_DBFS; self.columns.len()];
+        let raw: Vec<f32> = vec![self.floor; self.columns.len()];
         self.apply_ballistics(&raw, dt);
     }
 
@@ -227,7 +262,7 @@ impl Spectrum {
             self.hold_age = vec![0.0; raw.len()];
             return;
         }
-        let fall = DECAY_DB_PER_SEC * dt;
+        let fall = self.decay * dt;
         let hold_fall = PEAK_FALL_DB_PER_SEC * dt;
         for (i, &v) in raw.iter().enumerate() {
             let c = &mut self.columns[i];
@@ -238,7 +273,7 @@ impl Spectrum {
                 self.hold_age[i] = 0.0;
             } else {
                 self.hold_age[i] += dt;
-                if self.hold_age[i] > PEAK_HOLD_SECS {
+                if self.hold_age[i] > self.hold {
                     c.hold = (c.hold - hold_fall).max(c.level);
                 }
             }
@@ -257,7 +292,7 @@ impl Spectrum {
     fn update_detectors(&mut self, a: &Analysis, dt: f32) {
         // Everything below is meaningless on a silent signal, and a silent
         // signal is the normal state of an idle machine.
-        if a.bins.iter().all(|v| *v <= FLOOR_DBFS + 1.0) {
+        if a.bins.iter().all(|v| *v <= a.floor + 1.0) {
             self.hum_for = 0.0;
             self.band_for = 0.0;
             self.dc_for = 0.0;
@@ -332,7 +367,7 @@ pub const HUM_TOLERANCE_HZ: f32 = 2.0;
 /// exactly the narrow peaks this screen exists to find.
 pub fn fold_to_columns(a: &Analysis, axis: &Axis) -> Vec<f32> {
     let n = axis.width as usize;
-    let mut out = vec![FLOOR_DBFS; n];
+    let mut out = vec![a.floor; n];
     let bin_hz = a.bin_hz(1);
     for (i, slot) in out.iter_mut().enumerate() {
         let lo = axis.hz_at(i as u16);
@@ -347,7 +382,7 @@ pub fn fold_to_columns(a: &Analysis, axis: &Axis) -> Vec<f32> {
         } else {
             a.bins.len()
         };
-        *slot = a.bins[k0..k1].iter().copied().fold(FLOOR_DBFS, f32::max);
+        *slot = a.bins[k0..k1].iter().copied().fold(a.floor, f32::max);
     }
     out
 }
@@ -410,7 +445,7 @@ fn detect_hum(a: &Analysis) -> Option<(f32, f32)> {
 /// roll-off.
 fn detect_band_limit(a: &Analysis) -> Option<f32> {
     let bin_hz = a.bin_hz(1);
-    let threshold = FLOOR_DBFS + 12.0;
+    let threshold = a.floor + 12.0;
     let top = a.bins.iter().rposition(|v| *v >= threshold)?;
     let edge = top as f32 * bin_hz;
     if edge >= 0.9 * a.nyquist() || edge < 2000.0 {
@@ -439,7 +474,7 @@ mod tests {
     const RATE: u32 = 48_000;
 
     fn analyze(s: &[f32]) -> Analysis {
-        Analyzer::new().analyze(s, RATE)
+        Analyzer::default().analyze(s, RATE)
     }
 
     fn sine(hz: f32, amp: f32) -> Vec<f32> {

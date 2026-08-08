@@ -198,8 +198,8 @@ impl Verdict {
 }
 
 /// Decide whether anything is wrong, and say what in plain words.
-pub fn verdict(snap: &Snapshot, clipped_columns: usize) -> Verdict {
-    if snap.caps.xruns && snap.xruns_60s >= XRUN_ALERT_THRESHOLD {
+pub fn verdict(snap: &Snapshot, clipped_columns: usize, xrun_alert: u32) -> Verdict {
+    if snap.caps.xruns && snap.xruns_60s >= xrun_alert.max(1) {
         let cause = if snap
             .default_out
             .as_ref()
@@ -268,15 +268,15 @@ mod tests {
     #[test]
     fn one_xrun_does_not_paint_the_screen_red() {
         let s = snap(1, Some(dev(1, Direction::Output, 128, true)), None);
-        assert_eq!(verdict(&s, 0), Verdict::Nominal);
+        assert_eq!(verdict(&s, 0, XRUN_ALERT_THRESHOLD), Verdict::Nominal);
         let s = snap(2, Some(dev(1, Direction::Output, 128, true)), None);
-        assert_eq!(verdict(&s, 0), Verdict::Nominal);
+        assert_eq!(verdict(&s, 0, XRUN_ALERT_THRESHOLD), Verdict::Nominal);
     }
 
     #[test]
     fn a_burst_of_xruns_does() {
         let s = snap(14, Some(dev(1, Direction::Output, 128, true)), None);
-        match verdict(&s, 0) {
+        match verdict(&s, 0, XRUN_ALERT_THRESHOLD) {
             Verdict::Alert { headline, reason } => {
                 assert_eq!(headline, "14 xruns in 60s");
                 assert_eq!(reason, "14 xruns \u{b7} buffer too small");
@@ -288,7 +288,7 @@ mod tests {
     #[test]
     fn a_large_buffer_is_not_blamed_for_the_xruns() {
         let s = snap(14, Some(dev(1, Direction::Output, 1024, true)), None);
-        match verdict(&s, 0) {
+        match verdict(&s, 0, XRUN_ALERT_THRESHOLD) {
             Verdict::Alert { reason, .. } => assert_eq!(reason, "14 xruns \u{b7} dropouts"),
             v => panic!("expected alert, got {v:?}"),
         }
@@ -297,8 +297,8 @@ mod tests {
     #[test]
     fn sustained_clipping_alerts_but_a_transient_does_not() {
         let s = snap(0, Some(dev(1, Direction::Output, 128, true)), None);
-        assert_eq!(verdict(&s, 1), Verdict::Nominal);
-        assert!(verdict(&s, CLIP_ALERT_COLUMNS).is_alert());
+        assert_eq!(verdict(&s, 1, XRUN_ALERT_THRESHOLD), Verdict::Nominal);
+        assert!(verdict(&s, CLIP_ALERT_COLUMNS, XRUN_ALERT_THRESHOLD).is_alert());
     }
 
     #[test]

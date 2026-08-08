@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::backend::worker::{BackendWorker, Update};
+use crate::config::{Config, Setting};
 use crate::grid::{ASCII, Glyphs, UNICODE};
 use crate::layout::Layout;
 use crate::meter::{self, History};
@@ -35,6 +36,8 @@ pub enum Mode {
     Detail,
     /// The `?` overlay. LITE.md lists the key and never specifies the screen.
     Help,
+    /// The `,` settings menu.
+    Settings,
 }
 
 pub struct App {
@@ -62,8 +65,12 @@ pub struct App {
     pub in_hist: History,
     pub stream_hist: HashMap<String, History>,
     pub glyphs: Glyphs,
-    /// How charts are coloured and drawn. `--theme`. Set once, at construction.
-    pub theme: Theme,
+    /// Everything the settings menu can change.
+    pub cfg: Config,
+    /// Which row of the settings menu is selected.
+    pub setting: usize,
+    /// What the last save attempt said, shown in the menu's footer.
+    pub save_status: Option<String>,
     /// Where everything goes at the current terminal size. Owned by the App
     /// rather than recomputed in the renderer because the selection has to be
     /// clamped against the list height, and that is not a rendering concern.
@@ -84,26 +91,20 @@ pub struct App {
 
 impl App {
     /// The fixtures, with no audio system behind them.
-    pub fn demo(ascii: bool, theme: Theme) -> Self {
-        Self::new(crate::demo::snapshot(0), None, true, ascii, theme)
+    pub fn demo(cfg: Config) -> Self {
+        Self::new(crate::demo::snapshot(0), None, true, cfg)
     }
 
     /// A live backend, polled on its own thread. Starts on a placeholder
     /// snapshot and replaces it the moment the worker answers — which may be
     /// immediately, or may be after the user has dealt with a consent dialog.
-    pub fn live(
-        worker: BackendWorker,
-        backend: &'static str,
-        host: String,
-        ascii: bool,
-        theme: Theme,
-    ) -> Self {
-        Self::new(Snapshot::starting(backend, host), Some(worker), false, ascii, theme)
+    pub fn live(worker: BackendWorker, backend: &'static str, host: String, cfg: Config) -> Self {
+        Self::new(Snapshot::starting(backend, host), Some(worker), false, cfg)
     }
 
     /// One synchronous snapshot and no worker, for `--once`.
-    pub fn snapshot_only(snap: Snapshot, ascii: bool, theme: Theme) -> Self {
-        Self::new(snap, None, false, ascii, theme)
+    pub fn snapshot_only(snap: Snapshot, cfg: Config) -> Self {
+        Self::new(snap, None, false, cfg)
     }
 
     /// Private, and takes the theme, so no entry point can forget to pass it.
@@ -111,13 +112,7 @@ impl App {
     /// nothing in the live TUI because one of the three assignments did not
     /// survive a reformat. A flag that is accepted and ignored is worse than
     /// one that is rejected.
-    fn new(
-        snap: Snapshot,
-        worker: Option<BackendWorker>,
-        demo: bool,
-        ascii: bool,
-        theme: Theme,
-    ) -> Self {
+    fn new(snap: Snapshot, worker: Option<BackendWorker>, demo: bool, cfg: Config) -> Self {
         let mut app = Self {
             worker,
             verdict: Verdict::Nominal,
@@ -132,8 +127,10 @@ impl App {
             out_hist: History::new(),
             in_hist: History::new(),
             stream_hist: HashMap::new(),
-            glyphs: if ascii { ASCII } else { UNICODE },
-            theme,
+            glyphs: if cfg.ascii { ASCII } else { UNICODE },
+            cfg,
+            setting: 0,
+            save_status: None,
             layout: Layout::new(crate::grid::MIN_COLS, crate::grid::MIN_ROWS),
             spectrum: Spectrum::default(),
             demo,
@@ -183,7 +180,7 @@ impl App {
     }
 
     fn recompute_verdict(&mut self) {
-        self.verdict = verdict(&self.snap, self.clipped_columns());
+        self.verdict = verdict(&self.snap, self.clipped_columns(), self.cfg.xrun_alert);
     }
 
     /// Take everything the backend thread has produced since the last frame.
@@ -325,8 +322,25 @@ impl App {
     /// terminals whose glyph coverage cannot be trusted, and braille is a far
     /// riskier bet than the block elements.
     pub fn sub_columns(&self) -> usize {
-        let ascii = self.glyphs.blocks[7] != '\u{2588}';
-        crate::chart::sub_columns(self.theme.braille() && !ascii)
+        crate::chart::sub_columns(self.cfg.theme.braille() && !self.cfg.ascii)
+    }
+
+    /// Apply the current settings to everything that caches a copy of them.
+    /// Cheap and idempotent, so it can run every frame rather than needing a
+    /// change-detection path that could miss one.
+    pub fn apply_config(&mut self) {
+        self.glyphs = if self.cfg.ascii { ASCII } else { UNICODE };
+        self.spectrum.configure(&self.cfg);
+        if let Some(w) = &self.worker {
+            w.want_input_meter(self.cfg.meter_input);
+        }
+        self.recompute_verdict();
+    }
+
+    /// The theme in force. Reads through to the config so nothing can hold a
+    /// stale copy.
+    pub fn theme(&self) -> Theme {
+        self.cfg.theme
     }
 
     /// Adopt a new terminal size. Called once per frame before drawing, so a
@@ -376,6 +390,53 @@ impl App {
         self.clamp_selection();
     }
 
+    /// Keys inside the settings menu.
+    fn on_settings_key(&mut self, k: KeyEvent) {
+        let rows = Setting::ALL.len();
+        match k.code {
+            KeyCode::Esc | KeyCode::Char(',') | KeyCode::Char('q') => {
+                self.mode = self.return_to;
+                self.save_status = None;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.setting = (self.setting + rows - 1) % rows;
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.setting = (self.setting + 1) % rows;
+            }
+            KeyCode::Left | KeyCode::Char('h') => self.change_setting(-1),
+            KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter | KeyCode::Char(' ') => {
+                self.change_setting(1)
+            }
+            // Written explicitly rather than on every keystroke: a menu that
+            // rewrites a dotfile as you scroll through it is a menu you cannot
+            // experiment in.
+            KeyCode::Char('w') => {
+                self.save_status = Some(match self.cfg.save() {
+                    Ok(p) => format!("saved to {}", crate::config::short_path(&p, 48)),
+                    Err(e) => format!("could not save: {e}"),
+                });
+            }
+            KeyCode::Char('r') => {
+                self.cfg = Config::default();
+                self.apply_config();
+                self.save_status = Some("reset to defaults (not saved)".into());
+            }
+            _ => {}
+        }
+    }
+
+    fn change_setting(&mut self, delta: i32) {
+        let Some(s) = Setting::ALL.get(self.setting).copied() else { return };
+        s.adjust(&mut self.cfg, delta);
+        self.apply_config();
+        self.save_status = if s.needs_restart() {
+            Some("takes effect now; consent may be asked for".into())
+        } else {
+            None
+        };
+    }
+
     pub fn selected(&self) -> Option<Stream> {
         self.visible().get(self.sel).map(|s| (*s).clone())
     }
@@ -418,12 +479,22 @@ impl App {
             return;
         }
 
+        if self.mode == Mode::Settings {
+            self.on_settings_key(k);
+            return;
+        }
+
         match k.code {
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.should_quit = true
             }
             KeyCode::Char('p') => self.paused = !self.paused,
+            KeyCode::Char(',') => {
+                self.return_to = self.mode;
+                self.mode = Mode::Settings;
+                self.save_status = None;
+            }
             KeyCode::Char('s') => {
                 self.spectrum.cycle_source();
                 // Tell the backend to start (or stop) collecting audio. It is
@@ -487,7 +558,7 @@ mod tests {
     use super::*;
 
     fn app() -> App {
-        App::demo(false, Theme::default())
+        App::demo(Config::default())
     }
 
     fn key(c: KeyCode) -> KeyEvent {
@@ -603,8 +674,7 @@ mod tests {
             crate::backend::worker::BackendWorker::spawn(Box::new(Wedged)),
             "wedged",
             "test".into(),
-            false,
-            Theme::default(),
+            Config::default(),
         );
         live.poll_backend();
         assert_eq!(live.backend_stall(), Some("reading the audio system\u{2026}"));
@@ -622,8 +692,7 @@ mod tests {
             crate::backend::worker::BackendWorker::spawn(Box::new(Prompt)),
             "stub",
             "test".into(),
-            false,
-            Theme::default(),
+            Config::default(),
         );
         for _ in 0..500 {
             live.poll_backend();

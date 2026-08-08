@@ -17,9 +17,19 @@
 
 use std::collections::VecDeque;
 
-/// The bottom of the scale. Right for speech and music; the full tool serves
-/// noise-floor work.
+/// The default bottom of the *display* scale. Right for speech and music; the
+/// settings menu lowers it for noise-floor work. See [`crate::config::Config`].
 pub const FLOOR_DBFS: f32 = -60.0;
+
+/// The lowest level the meters ever *record*, as distinct from the lowest they
+/// draw.
+///
+/// These were one number until the floor became configurable, and conflating
+/// them is a subtle bug: if silence is stored as -60 and the user then lowers
+/// the display floor to -90, every silent bucket in the history redraws at a
+/// third of full height. The ring keeps real dB and the renderer decides where
+/// the bottom of the picture is.
+pub const CAPTURE_FLOOR_DBFS: f32 = -120.0;
 /// The window the time axis advertises.
 pub const WINDOW_SECS: f32 = 60.0;
 
@@ -42,16 +52,16 @@ pub const BUCKET_SECS: f32 = WINDOW_SECS / HISTORY_BUCKETS as f32;
 /// dB-space normalisation to 0..=1. dBFS is logarithmic and the chart is not;
 /// normalising in dB space before the glyph conversion is what keeps the meter
 /// honest. Plotting raw amplitude makes every meter a liar.
-pub fn norm(dbfs: f32) -> f32 {
-    if !dbfs.is_finite() {
+pub fn norm(dbfs: f32, floor: f32) -> f32 {
+    if !dbfs.is_finite() || floor >= 0.0 {
         return 0.0;
     }
-    ((dbfs - FLOOR_DBFS) / -FLOOR_DBFS).clamp(0.0, 1.0)
+    ((dbfs - floor) / -floor).clamp(0.0, 1.0)
 }
 
 /// One sparkline cell.
-pub fn spark(dbfs: f32, blocks: &[char; 8]) -> char {
-    let idx = (norm(dbfs) * 7.0).round().clamp(0.0, 7.0) as usize;
+pub fn spark(dbfs: f32, blocks: &[char; 8], floor: f32) -> char {
+    let idx = (norm(dbfs, floor) * 7.0).round().clamp(0.0, 7.0) as usize;
     blocks[idx]
 }
 
@@ -65,7 +75,7 @@ pub fn downsample_max(src: &[f32], n: usize) -> Vec<f32> {
         return Vec::new();
     }
     if src.is_empty() {
-        return vec![FLOOR_DBFS; n];
+        return vec![CAPTURE_FLOOR_DBFS; n];
     }
     (0..n)
         .map(|i| {
@@ -133,7 +143,7 @@ impl History {
     /// [`BUCKET_SECS`]. A bucket with no samples holds the floor rather than
     /// carrying the previous peak forward, so a stopped stream visibly decays.
     pub fn commit(&mut self) {
-        let v = if self.bucket_has_sample { self.bucket } else { FLOOR_DBFS };
+        let v = if self.bucket_has_sample { self.bucket } else { CAPTURE_FLOOR_DBFS };
         if self.cols.len() == HISTORY_BUCKETS {
             self.cols.pop_front();
         }
@@ -150,7 +160,7 @@ impl History {
     /// floor so a freshly started process doesn't draw a misleading full-width
     /// chart. Reduce to the chart's width with [`downsample_max`].
     pub fn series(&self) -> Vec<f32> {
-        let mut out = vec![FLOOR_DBFS; HISTORY_BUCKETS.saturating_sub(self.cols.len())];
+        let mut out = vec![CAPTURE_FLOOR_DBFS; HISTORY_BUCKETS.saturating_sub(self.cols.len())];
         out.extend(self.cols.iter().copied());
         out
     }
@@ -183,12 +193,15 @@ mod tests {
 
     #[test]
     fn normalisation_is_in_db_space() {
-        assert_eq!(norm(-60.0), 0.0);
-        assert_eq!(norm(0.0), 1.0);
-        assert_eq!(norm(-30.0), 0.5);
+        assert_eq!(norm(-60.0, -60.0), 0.0);
+        assert_eq!(norm(0.0, -60.0), 1.0);
+        assert_eq!(norm(-30.0, -60.0), 0.5);
         // Below the floor and above full scale both clamp.
-        assert_eq!(norm(-90.0), 0.0);
-        assert_eq!(norm(6.0), 1.0);
+        assert_eq!(norm(-90.0, -60.0), 0.0);
+        assert_eq!(norm(6.0, -60.0), 1.0);
+        // And a lowered floor rescales rather than clipping.
+        assert_eq!(norm(-45.0, -90.0), 0.5);
+        assert_eq!(norm(-90.0, -90.0), 0.0);
     }
 
     #[test]
@@ -226,7 +239,7 @@ mod tests {
         let s = h.series();
         assert_eq!(s.len(), HISTORY_BUCKETS);
         assert_eq!(*s.last().unwrap(), -10.0);
-        assert_eq!(s[0], FLOOR_DBFS);
+        assert_eq!(s[0], CAPTURE_FLOOR_DBFS);
 
         for i in 0..HISTORY_BUCKETS + 20 {
             h.push_sample(-(i as f32));
@@ -263,13 +276,25 @@ mod tests {
         assert_eq!(h.columns(78), src, "fixture changed shape in the ring");
     }
 
+    /// A silent bucket must record real silence, not the display floor, or
+    /// lowering the floor redraws history that never happened.
+    #[test]
+    fn silence_is_recorded_below_every_display_floor() {
+        let mut h = History::new();
+        h.commit();
+        let quietest = *h.series().last().unwrap();
+        for floor in [-40.0, -60.0, -90.0, -120.0] {
+            assert_eq!(norm(quietest, floor), 0.0, "silence is not at the bottom at {floor}");
+        }
+    }
+
     #[test]
     fn empty_bucket_decays_to_floor() {
         let mut h = History::new();
         h.push_sample(-6.0);
         h.commit();
         h.commit(); // a bucket with no samples
-        assert_eq!(*h.series().last().unwrap(), FLOOR_DBFS);
+        assert_eq!(*h.series().last().unwrap(), CAPTURE_FLOOR_DBFS);
         // Peak-hold still remembers the window.
         assert_eq!(h.peak(), Some(-6.0));
     }

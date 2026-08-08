@@ -319,11 +319,13 @@ impl IoProcMeter {
         }
         let bits = self.state.peak.swap(0, Ordering::Relaxed);
         if bits == 0 {
-            // Silence is a real reading, not a missing one.
-            return Some(crate::meter::FLOOR_DBFS);
+            // Silence is a real reading, not a missing one. Recorded at the
+            // capture floor rather than the display floor: what the meter draws
+            // is configurable, what it heard is not.
+            return Some(crate::meter::CAPTURE_FLOOR_DBFS);
         }
         let linear = f32::from_bits(bits);
-        Some((20.0 * linear.log10()).clamp(crate::meter::FLOOR_DBFS, 0.0))
+        Some((20.0 * linear.log10()).clamp(crate::meter::CAPTURE_FLOOR_DBFS, 0.0))
     }
 
     /// A meter with no device behind it, for exercising the arithmetic.
@@ -376,7 +378,7 @@ mod tests {
         assert!((d - -6.02).abs() < 0.05, "half amplitude should be about -6 dBFS, got {d}");
 
         // Reading clears, so silence follows.
-        assert_eq!(m.peak_dbfs(), Some(crate::meter::FLOOR_DBFS));
+        assert_eq!(m.peak_dbfs(), Some(crate::meter::CAPTURE_FLOOR_DBFS));
     }
 
     #[test]
@@ -390,7 +392,7 @@ mod tests {
         a.state.peak.store(1.0f32.to_bits(), Ordering::Relaxed);
 
         assert_eq!(a.peak_dbfs(), Some(0.0));
-        assert_eq!(b.peak_dbfs(), Some(crate::meter::FLOOR_DBFS), "b read a's signal");
+        assert_eq!(b.peak_dbfs(), Some(crate::meter::CAPTURE_FLOOR_DBFS), "b read a's signal");
     }
 
     #[test]

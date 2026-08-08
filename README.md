@@ -47,8 +47,9 @@ cargo run -- --demo   # the design fixtures — touches no audio device at all
 | `--demo` | drive the UI from the handoff's deterministic fixtures; opens nothing |
 | `--meter-input` | also meter the default input device (see [Input](#input-is-opt-in)) |
 | `--theme <name>` | `spec` (default) or `btop` — see [Themes](#themes) |
+| `--defaults` | ignore the saved settings for this run |
 | `--ascii` | ASCII stand-ins for glyphs that are not reliably single-width |
-| `--once <state>` | render `main`, `paused`, `filter`, `detail`, `alert`, `help` or `spectrum` and exit |
+| `--once <state>` | render `main`, `paused`, `filter`, `detail`, `alert`, `help`, `spectrum` or `settings` and exit |
 | `--no-color` | with `--once`, emit plain text |
 | `--probe-tap` | start the tap, watch it for five seconds, report what arrived |
 
@@ -99,6 +100,59 @@ it is not by bin index at this resolution, only by interpolating the peak.
 `docs/SPECTRUM.md` is the specification, with the constants, the detector
 thresholds and the reasoning behind each.
 
+## Settings
+
+`,` opens a menu for everything the tool can be told to do differently. Values
+are shown rather than hidden behind submenus — half the point of a settings
+screen in a diagnostic tool is answering *what is this thing currently doing?*
+— and every row carries a line saying what the setting **costs**, because each
+one is a trade and none has a right answer.
+
+```
+┌─ settings ───────────────────────────────────────────────────┐
+│ display                                                      │
+│ › theme                                                 spec │
+│   glyphs                                             unicode │
+│   meter floor                                       -60 dBFS │
+│   xrun alert                                               3 │
+│   refresh                                             20 fps │
+│ metering                                                     │
+│   input meter                                            off │
+│ spectrum                                                     │
+│   analysis size                                      4096 pt │
+│   spectrum floor                                    -96 dBFS │
+│   bar decay                                          20 dB/s │
+│   peak hold                                            1.5 s │
+│                                                              │
+│ btop shades bars by height; spec colours them by meaning     │
+│ ↑↓ choose   ←→ change   w write   r reset   esc close        │
+└──────────────────────────────────────────────────────────────┘
+```
+
+Everything applies **immediately**, including the input meter — a menu whose
+switches only take effect at the next launch is a configuration file with extra
+steps. Changing the input meter opens or closes a real capture stream, so macOS
+may ask for consent at that moment.
+
+`w` writes to `$XDG_CONFIG_HOME/soundwatch/config.toml` (or `~/.config/…`).
+Saving is explicit rather than automatic: a menu that rewrites a dotfile as you
+scroll through it is a menu you cannot experiment in. `r` resets to defaults
+without saving. Command-line flags override the saved file for one run without
+editing it, and `--defaults` ignores it entirely.
+
+The file is `key = value` lines, parsed by hand — taking `serde` and `toml` for
+ten scalars would roughly double the dependency tree of a program that
+hand-rolls its CoreAudio bindings and its FFT to avoid exactly that. The parser
+is deliberately forgiving: an unknown key, a malformed value or one out of range
+is skipped and the default kept, and the rest of the file still loads. A
+diagnostic tool that refuses to start because its config has a typo has failed
+at the one moment you needed it.
+
+**`Config::default()` is the spec's numbers, taken from the constants
+themselves.** A fresh install behaves identically to the version that had no
+settings menu; a setting is somewhere to depart from the design, not a
+substitute for having one.
+
 ## Themes
 
 `--theme btop` colours every bar as a vertical gradient — the direction colour
@@ -135,9 +189,14 @@ trusted, and braille is a far riskier bet than `▁▂▃`.
 
 ## Keys
 
-`q` quit · `p` pause · `s` spectrum · `/` filter · `↵` detail · `?` help ·
-`↑↓` (or `j`/`k`) move the selection · `esc` close the spectrum, close detail,
-or clear the filter.
+`q` quit · `p` pause · `s` spectrum · `,` settings · `/` filter · `↵` detail ·
+`?` help · `↑↓` (or `j`/`k`) move the selection · `esc` close the spectrum,
+close detail, or clear the filter.
+
+Seven keys and the version string do not fit an 80-column footer, so two things
+give way in order: the version drops its name to a bare number, and then keys
+are shed — from the *second* to last, never the last, because the last one is
+`?` and it is the key that explains all the others.
 
 ## Read-only, by construction
 
@@ -379,6 +438,7 @@ than a mangled layout.
 | `dsp.rs` | the FFT, the Hann window, and the normalisation that is usually wrong |
 | `spectrum.rs` | log frequency mapping, analyser ballistics, and the fault detectors |
 | `chart.rs` | bar charts in blocks or braille, shared by the meters and the spectrum |
+| `config.rs` | every setting, the `,` menu's model, and the file it is saved in |
 | `backend/worker.rs` | the backend on its own thread, so a stalled HAL cannot freeze the UI |
 | `backend/ioproc.rs` | the real-time peak callback both meters attach through |
 | `backend/tap.rs` | the output process tap and its private aggregate device |

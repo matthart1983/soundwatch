@@ -116,14 +116,18 @@ fn fft(re: &mut [f32], im: &mut [f32]) {
 
 /// One transform's worth of magnitudes, in dBFS.
 pub struct Analysis {
-    /// `FFT_SIZE/2 + 1` bins, DC through Nyquist.
+    /// `size/2 + 1` bins, DC through Nyquist.
     pub bins: Vec<f32>,
     pub rate: u32,
+    /// Transform size this came from. Configurable, so never assume the const.
+    pub size: usize,
+    /// Bottom of the scale these bins were clamped to.
+    pub floor: f32,
 }
 
 impl Analysis {
     pub fn bin_hz(&self, k: usize) -> f32 {
-        k as f32 * self.rate as f32 / FFT_SIZE as f32
+        k as f32 * self.rate as f32 / self.size as f32
     }
 
     pub fn nyquist(&self) -> f32 {
@@ -145,7 +149,7 @@ impl Analysis {
             .enumerate()
             .skip(1)
             .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))?;
-        if db <= FLOOR_DBFS {
+        if db <= self.floor {
             return None;
         }
         let delta = if k > 0 && k + 1 < self.bins.len() {
@@ -155,7 +159,7 @@ impl Analysis {
         } else {
             0.0
         };
-        Some(((k as f32 + delta) * self.rate as f32 / FFT_SIZE as f32, db))
+        Some(((k as f32 + delta) * self.rate as f32 / self.size as f32, db))
     }
 }
 
@@ -164,24 +168,43 @@ pub struct Analyzer {
     window: Window,
     re: Vec<f32>,
     im: Vec<f32>,
+    size: usize,
+    floor: f32,
 }
 
 impl Default for Analyzer {
     fn default() -> Self {
-        Self::new()
+        Self::new(FFT_SIZE, FLOOR_DBFS)
     }
 }
 
 impl Analyzer {
-    pub fn new() -> Self {
-        Self { window: Window::default(), re: vec![0.0; FFT_SIZE], im: vec![0.0; FFT_SIZE] }
+    /// `size` must be a power of two; anything else falls back to the default,
+    /// because a radix-2 transform of a non-power-of-two is not a transform.
+    pub fn new(size: usize, floor: f32) -> Self {
+        let size = if size.is_power_of_two() && size >= 64 { size } else { FFT_SIZE };
+        Self {
+            window: Window::hann(size),
+            re: vec![0.0; size],
+            im: vec![0.0; size],
+            size,
+            floor: if floor < 0.0 { floor } else { FLOOR_DBFS },
+        }
     }
 
-    /// Analyse exactly [`FFT_SIZE`] samples. Shorter input is zero-padded,
-    /// longer input uses the most recent window.
+    pub fn size(&self) -> usize {
+        self.size
+    }
+
+    pub fn floor(&self) -> f32 {
+        self.floor
+    }
+
+    /// Analyse exactly [`Analyzer::size`] samples. Shorter input is
+    /// zero-padded, longer input uses the most recent window.
     pub fn analyze(&mut self, samples: &[f32], rate: u32) -> Analysis {
-        let src =
-            if samples.len() > FFT_SIZE { &samples[samples.len() - FFT_SIZE..] } else { samples };
+        let n = self.size;
+        let src = if samples.len() > n { &samples[samples.len() - n..] } else { samples };
         self.re[..src.len()].copy_from_slice(src);
         self.re[src.len()..].fill(0.0);
         self.im.fill(0.0);
@@ -191,19 +214,20 @@ impl Analyzer {
 
         fft(&mut self.re, &mut self.im);
 
-        let n = FFT_SIZE as f32;
+        let nf = n as f32;
         let cg = self.window.coherent_gain;
-        let bins = (0..=FFT_SIZE / 2)
+        let floor = self.floor;
+        let bins = (0..=n / 2)
             .map(|k| {
                 let mag = (self.re[k] * self.re[k] + self.im[k] * self.im[k]).sqrt();
                 // Single-sided amplitude. DC and Nyquist are not doubled: they
                 // have no negative-frequency twin to fold in.
                 let amp =
-                    if k == 0 || k == FFT_SIZE / 2 { mag / (n * cg) } else { 2.0 * mag / (n * cg) };
-                if amp <= 0.0 { FLOOR_DBFS } else { (20.0 * amp.log10()).max(FLOOR_DBFS) }
+                    if k == 0 || k == n / 2 { mag / (nf * cg) } else { 2.0 * mag / (nf * cg) };
+                if amp <= 0.0 { floor } else { (20.0 * amp.log10()).max(floor) }
             })
             .collect();
-        Analysis { bins, rate }
+        Analysis { bins, rate, size: n, floor }
     }
 }
 
@@ -227,7 +251,7 @@ mod tests {
     /// every reading is 6.02 dB low and nothing else looks wrong.
     #[test]
     fn a_full_scale_sine_reads_zero_dbfs() {
-        let mut a = Analyzer::new();
+        let mut a = Analyzer::default();
         let k = 85;
         let out = a.analyze(&sine(bin_centred(k), 1.0, FFT_SIZE), RATE);
         assert!(
@@ -239,7 +263,7 @@ mod tests {
 
     #[test]
     fn a_one_kilohertz_tone_lands_in_bin_eighty_five() {
-        let mut a = Analyzer::new();
+        let mut a = Analyzer::default();
         let out = a.analyze(&sine(1000.0, 1.0, FFT_SIZE), RATE);
         let (k, _) = out
             .bins
@@ -254,7 +278,7 @@ mod tests {
 
     #[test]
     fn halving_the_amplitude_costs_six_decibels() {
-        let mut a = Analyzer::new();
+        let mut a = Analyzer::default();
         let k = 85;
         let full = a.analyze(&sine(bin_centred(k), 1.0, FFT_SIZE), RATE).bins[k];
         let half = a.analyze(&sine(bin_centred(k), 0.5, FFT_SIZE), RATE).bins[k];
@@ -263,7 +287,7 @@ mod tests {
 
     #[test]
     fn dc_lands_in_bin_zero_and_is_not_doubled() {
-        let mut a = Analyzer::new();
+        let mut a = Analyzer::default();
         let out = a.analyze(&vec![1.0f32; FFT_SIZE], RATE);
         // A DC level of 1.0 is full scale, and bin 0 must not be doubled.
         assert!((out.bins[0] - 0.0).abs() < 0.1, "DC read {} dBFS", out.bins[0]);
@@ -278,7 +302,7 @@ mod tests {
 
     #[test]
     fn nyquist_is_not_doubled_either() {
-        let mut a = Analyzer::new();
+        let mut a = Analyzer::default();
         // Alternating +/-1 is exactly Nyquist at full scale.
         let s: Vec<f32> = (0..FFT_SIZE).map(|i| if i % 2 == 0 { 1.0 } else { -1.0 }).collect();
         let out = a.analyze(&s, RATE);
@@ -288,7 +312,7 @@ mod tests {
 
     #[test]
     fn silence_reads_the_floor_everywhere_and_produces_no_nans() {
-        let mut a = Analyzer::new();
+        let mut a = Analyzer::default();
         let out = a.analyze(&vec![0.0f32; FFT_SIZE], RATE);
         assert!(out.bins.iter().all(|v| v.is_finite()), "a non-finite bin escaped");
         assert!(out.bins.iter().all(|v| *v <= FLOOR_DBFS + 1e-3), "silence is not at the floor");
@@ -300,7 +324,7 @@ mod tests {
     /// single-tone tests happen to agree with.
     #[test]
     fn energy_is_conserved() {
-        let mut a = Analyzer::new();
+        let mut a = Analyzer::default();
         // Two tones and a DC term, so no single special case dominates.
         let s: Vec<f32> = (0..FFT_SIZE)
             .map(|i| {
@@ -338,7 +362,7 @@ mod tests {
     /// apart and the interpolated frequency must.
     #[test]
     fn peak_interpolation_separates_fifty_from_sixty_hertz() {
-        let mut a = Analyzer::new();
+        let mut a = Analyzer::default();
         for hz in [50.0f32, 60.0] {
             let out = a.analyze(&sine(hz, 0.5, FFT_SIZE), RATE);
             let (f, _) = out.peak().expect("a tone has a peak");
@@ -354,7 +378,7 @@ mod tests {
 
     #[test]
     fn peak_interpolation_recovers_an_off_centre_tone() {
-        let mut a = Analyzer::new();
+        let mut a = Analyzer::default();
         let out = a.analyze(&sine(1002.5, 0.7, FFT_SIZE), RATE);
         let (f, db) = out.peak().expect("a tone has a peak");
         assert!((f - 1002.5).abs() < 1.0, "peak located at {f} Hz");
@@ -374,6 +398,43 @@ mod tests {
             let mag = (re[k] * re[k] + im[k] * im[k]).sqrt();
             assert!((mag - 1.0).abs() < 1e-5, "bin {k} of an impulse is {mag}");
         }
+    }
+
+    /// Every offered size has to transform correctly, not just the default.
+    #[test]
+    fn every_configurable_size_reads_a_full_scale_sine_correctly() {
+        for size in crate::config::FFT_SIZES {
+            let mut a = Analyzer::new(size, FLOOR_DBFS);
+            assert_eq!(a.size(), size);
+            let k = size / 16;
+            let hz = k as f32 * RATE as f32 / size as f32;
+            let s: Vec<f32> =
+                (0..size).map(|i| (2.0 * PI * hz * i as f32 / RATE as f32).sin()).collect();
+            let out = a.analyze(&s, RATE);
+            assert_eq!(out.bins.len(), size / 2 + 1);
+            assert!((out.bins[k]).abs() < 0.15, "size {size}: read {} dBFS", out.bins[k]);
+            let (f, _) = out.peak().expect("a tone has a peak");
+            assert!((f - hz).abs() < 2.0, "size {size}: peak at {f}, expected {hz}");
+        }
+    }
+
+    #[test]
+    fn a_nonsense_size_falls_back_rather_than_panicking() {
+        // A radix-2 transform of 4095 points is not a transform.
+        assert_eq!(Analyzer::new(4095, FLOOR_DBFS).size(), FFT_SIZE);
+        assert_eq!(Analyzer::new(0, FLOOR_DBFS).size(), FFT_SIZE);
+        assert_eq!(Analyzer::new(FFT_SIZE, 12.0).floor(), FLOOR_DBFS);
+    }
+
+    #[test]
+    fn a_lower_floor_shows_more_of_the_noise() {
+        let quiet: Vec<f32> = (0..FFT_SIZE)
+            .map(|i| 1e-5 * (2.0 * PI * 1000.0 * i as f32 / RATE as f32).sin())
+            .collect();
+        let shallow = Analyzer::new(FFT_SIZE, -60.0).analyze(&quiet, RATE);
+        let deep = Analyzer::new(FFT_SIZE, -120.0).analyze(&quiet, RATE);
+        assert_eq!(shallow.bins[85], -60.0, "a -100 dBFS tone should be clamped at a -60 floor");
+        assert!(deep.bins[85] < -80.0, "a lower floor did not reveal the tone: {}", deep.bins[85]);
     }
 
     #[test]
