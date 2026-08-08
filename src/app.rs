@@ -5,8 +5,9 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::backend::AudioBackend;
+use crate::backend::worker::{BackendWorker, Update};
 use crate::grid::{ASCII, Glyphs, UNICODE};
+use crate::layout::Layout;
 use crate::meter::{self, History};
 use crate::model::{Snapshot, Stream, Verdict, verdict};
 
@@ -17,10 +18,11 @@ pub const SAMPLE_HZ: u64 = 20;
 pub const SAMPLE_INTERVAL: Duration = Duration::from_millis(1000 / SAMPLE_HZ);
 /// Full state read. Devices and stream lists do not need 20 Hz.
 pub const TICK_INTERVAL: Duration = Duration::from_secs(1);
-/// Rows available to the stream table in the main state.
-pub const LIST_ROWS: usize = 8;
-/// Rows available to the stream table when the detail block is open.
-pub const DETAIL_LIST_ROWS: usize = 5;
+/// How long the backend may stay silent before the screen stops saying
+/// "reading" and starts saying "something is wrong".
+pub const STALL_AFTER: Duration = Duration::from_secs(2);
+// How many rows the stream table gets is no longer a constant: it depends on
+// how tall the terminal is. See `crate::layout::Layout`.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -34,7 +36,14 @@ pub enum Mode {
 }
 
 pub struct App {
-    backend: Box<dyn AudioBackend>,
+    /// The live backend, on its own thread. `None` in `--demo` and in `--once`,
+    /// which are driven synchronously and never poll.
+    ///
+    /// Nothing on the UI thread ever calls CoreAudio: a single blocking
+    /// property read is enough to freeze the whole program, and one of them
+    /// blocks whenever a consent decision is pending. See
+    /// [`crate::backend::worker`].
+    worker: Option<BackendWorker>,
     pub snap: Snapshot,
     pub verdict: Verdict,
     pub mode: Mode,
@@ -51,18 +60,41 @@ pub struct App {
     pub in_hist: History,
     pub stream_hist: HashMap<String, History>,
     pub glyphs: Glyphs,
+    /// Where everything goes at the current terminal size. Owned by the App
+    /// rather than recomputed in the renderer because the selection has to be
+    /// clamped against the list height, and that is not a rendering concern.
+    pub layout: Layout,
     pub demo: bool,
     pub should_quit: bool,
     last_tick: Instant,
     last_commit: Instant,
+    /// When the app started, and whether the backend has ever answered.
+    started: Instant,
+    heard_from_backend: bool,
     demo_xruns: u32,
 }
 
 impl App {
-    pub fn new(mut backend: Box<dyn AudioBackend>, demo: bool, ascii: bool) -> Self {
-        let snap = if demo { crate::demo::snapshot(0) } else { backend.snapshot() };
+    /// The fixtures, with no audio system behind them.
+    pub fn demo(ascii: bool) -> Self {
+        Self::new(crate::demo::snapshot(0), None, true, ascii)
+    }
+
+    /// A live backend, polled on its own thread. Starts on a placeholder
+    /// snapshot and replaces it the moment the worker answers — which may be
+    /// immediately, or may be after the user has dealt with a consent dialog.
+    pub fn live(worker: BackendWorker, backend: &'static str, host: String, ascii: bool) -> Self {
+        Self::new(Snapshot::starting(backend, host), Some(worker), false, ascii)
+    }
+
+    /// One synchronous snapshot and no worker, for `--once`.
+    pub fn snapshot_only(snap: Snapshot, ascii: bool) -> Self {
+        Self::new(snap, None, false, ascii)
+    }
+
+    fn new(snap: Snapshot, worker: Option<BackendWorker>, demo: bool, ascii: bool) -> Self {
         let mut app = Self {
-            backend,
+            worker,
             verdict: Verdict::Nominal,
             snap,
             mode: Mode::Main,
@@ -76,10 +108,13 @@ impl App {
             in_hist: History::new(),
             stream_hist: HashMap::new(),
             glyphs: if ascii { ASCII } else { UNICODE },
+            layout: Layout::new(crate::grid::MIN_COLS, crate::grid::MIN_ROWS),
             demo,
             should_quit: false,
             last_tick: Instant::now(),
             last_commit: Instant::now(),
+            started: Instant::now(),
+            heard_from_backend: false,
             demo_xruns: 0,
         };
         if demo {
@@ -109,24 +144,58 @@ impl App {
         self.verdict = verdict(&self.snap, self.clipped_columns());
     }
 
-    /// One meter sample. Cheap, and skipped entirely while paused.
-    pub fn sample(&mut self) {
+    /// Take everything the backend thread has produced since the last frame.
+    /// Never blocks, however wedged the audio system is.
+    pub fn poll_backend(&mut self) {
+        let Some(worker) = &self.worker else { return };
+        // Collected first so the borrow of `worker` ends before `self` is
+        // mutated. The queue is bounded, so this is a small vector.
+        let updates: Vec<Update> = worker.drain().collect();
+        if updates.is_empty() {
+            return;
+        }
+        // Paused means the screen is frozen, so the updates are read off the
+        // queue (a full queue would stall the backend) and then discarded.
         if self.paused {
             return;
         }
-        if !self.demo {
-            let l = self.backend.levels();
-            if let Some(d) = l.out_dbfs {
-                self.out_hist.push_sample(d);
-            }
-            if let Some(d) = l.in_dbfs {
-                self.in_hist.push_sample(d);
-            }
-            for s in &self.snap.streams {
-                if let Some(d) = s.level_dbfs {
-                    self.stream_hist.entry(s.key.clone()).or_default().push_sample(d);
+        let mut snapped = false;
+        for u in updates {
+            match u {
+                Update::Levels(l) => {
+                    if let Some(d) = l.out_dbfs {
+                        self.out_hist.push_sample(d);
+                    }
+                    if let Some(d) = l.in_dbfs {
+                        self.in_hist.push_sample(d);
+                    }
+                    for s in &self.snap.streams {
+                        if let Some(d) = s.level_dbfs {
+                            self.stream_hist.entry(s.key.clone()).or_default().push_sample(d);
+                        }
+                    }
+                }
+                Update::Snapshot(snap) => {
+                    self.snap = *snap;
+                    self.heard_from_backend = true;
+                    snapped = true;
                 }
             }
+        }
+        if snapped {
+            let live: Vec<&str> = self.snap.streams.iter().map(|s| s.key.as_str()).collect();
+            self.stream_hist.retain(|k, _| live.contains(&k.as_str()));
+            self.clamp_selection();
+        }
+        self.recompute_verdict();
+    }
+
+    /// Close the current history bucket when one is due. Separate from the
+    /// backend poll because the chart advances on wall-clock time whether or
+    /// not the audio system has anything to say.
+    pub fn sample(&mut self) {
+        if self.paused {
+            return;
         }
         if self.last_commit.elapsed().as_secs_f32() >= meter::BUCKET_SECS {
             self.last_commit = Instant::now();
@@ -140,21 +209,34 @@ impl App {
         }
     }
 
-    /// Full state read, at [`TICK_INTERVAL`].
+    /// Demo-only state advance, at [`TICK_INTERVAL`]. Live state arrives from
+    /// the backend thread instead; see [`App::poll_backend`].
     pub fn tick(&mut self) {
-        if self.paused || self.last_tick.elapsed() < TICK_INTERVAL {
+        if self.paused || !self.demo || self.last_tick.elapsed() < TICK_INTERVAL {
             return;
         }
         self.last_tick = Instant::now();
-        if self.demo {
-            self.snap = crate::demo::snapshot(self.demo_xruns);
-        } else {
-            self.snap = self.backend.snapshot();
-            let live: Vec<&str> = self.snap.streams.iter().map(|s| s.key.as_str()).collect();
-            self.stream_hist.retain(|k, _| live.contains(&k.as_str()));
-        }
+        self.snap = crate::demo::snapshot(self.demo_xruns);
         self.clamp_selection();
         self.recompute_verdict();
+    }
+
+    /// What to say when the backend has not answered yet.
+    ///
+    /// A backend that is merely slow is invisible — the first snapshot lands in
+    /// milliseconds. A backend that is *stuck* is almost always stuck behind a
+    /// permission dialog, which the user may not have noticed and which nothing
+    /// on this screen would otherwise mention. So the placeholder escalates
+    /// from "reading" to something the user can act on.
+    pub fn backend_stall(&self) -> Option<&'static str> {
+        if self.worker.is_none() || self.heard_from_backend {
+            return None;
+        }
+        if self.started.elapsed() >= STALL_AFTER {
+            Some("the audio system has not answered \u{2014} look for a permission prompt")
+        } else {
+            Some("reading the audio system\u{2026}")
+        }
     }
 
     /// Streams after the active filter, in display order.
@@ -176,9 +258,20 @@ impl App {
             .collect()
     }
 
+    /// Adopt a new terminal size. Called once per frame before drawing, so a
+    /// resize takes effect on the same frame the user sees it.
+    pub fn set_viewport(&mut self, w: u16, h: u16) {
+        let next = Layout::new(w, h);
+        if next != self.layout {
+            self.layout = next;
+            // A shorter list can strand the selection off the bottom.
+            self.clamp_selection();
+        }
+    }
+
     /// Rows the table can show in the current mode.
     pub fn list_rows(&self) -> usize {
-        if self.mode == Mode::Detail { DETAIL_LIST_ROWS } else { LIST_ROWS }
+        self.layout.list_rows_for(self.mode == Mode::Detail) as usize
     }
 
     fn clamp_selection(&mut self) {
@@ -306,27 +399,9 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::{AudioBackend, Levels};
-    use crate::model::Caps;
-
-    struct DemoBackend;
-    impl AudioBackend for DemoBackend {
-        fn name(&self) -> &'static str {
-            "demo"
-        }
-        fn caps(&self) -> Caps {
-            Caps::default()
-        }
-        fn snapshot(&mut self) -> Snapshot {
-            crate::demo::snapshot(0)
-        }
-        fn levels(&mut self) -> Levels {
-            Levels::default()
-        }
-    }
 
     fn app() -> App {
-        App::new(Box::new(DemoBackend), true, false)
+        App::demo(false)
     }
 
     fn key(c: KeyCode) -> KeyEvent {
@@ -352,7 +427,7 @@ mod tests {
     fn selection_can_reach_every_stream_past_the_window() {
         let mut a = crowded_app();
         let n = a.visible().len();
-        assert!(n > LIST_ROWS, "fixture must overflow the list to test this");
+        assert!(n > a.list_rows(), "fixture must overflow the list to test this");
         for _ in 0..n {
             a.on_key(key(KeyCode::Down));
         }
@@ -422,12 +497,87 @@ mod tests {
         }
         a.on_key(key(KeyCode::Enter));
         assert_eq!(a.mode, Mode::Detail);
-        assert_eq!(a.list_rows(), DETAIL_LIST_ROWS);
+        assert_eq!(a.list_rows(), 5, "detail must displace three of the eight rows");
         assert!(
-            a.sel >= a.scroll && a.sel < a.scroll + DETAIL_LIST_ROWS,
+            a.sel >= a.scroll && a.sel < a.scroll + a.list_rows(),
             "selected stream scrolled out of the truncated list"
         );
         assert!(a.selected().is_some());
+    }
+
+    /// The placeholder must escalate: a backend that never answers is almost
+    /// always one waiting on a permission dialog the user has not seen.
+    #[test]
+    fn a_silent_backend_eventually_says_something_actionable() {
+        // Demo has no worker, so it never claims the backend is stalled.
+        let a = app();
+        assert!(a.backend_stall().is_none(), "the fixtures are never stalled");
+
+        let mut live = App::live(
+            crate::backend::worker::BackendWorker::spawn(Box::new(Wedged)),
+            "wedged",
+            "test".into(),
+            false,
+        );
+        live.poll_backend();
+        assert_eq!(live.backend_stall(), Some("reading the audio system\u{2026}"));
+
+        live.started = Instant::now() - STALL_AFTER;
+        live.poll_backend();
+        let stalled = live.backend_stall().expect("still stalled");
+        assert!(stalled.contains("permission prompt"), "unhelpful stall message: {stalled:?}");
+    }
+
+    /// And it stops saying it the moment the backend does answer.
+    #[test]
+    fn a_backend_that_answers_clears_the_stall() {
+        let mut live = App::live(
+            crate::backend::worker::BackendWorker::spawn(Box::new(Prompt)),
+            "stub",
+            "test".into(),
+            false,
+        );
+        for _ in 0..500 {
+            live.poll_backend();
+            if live.backend_stall().is_none() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        panic!("the stall notice never cleared");
+    }
+
+    struct Wedged;
+    impl crate::backend::AudioBackend for Wedged {
+        fn name(&self) -> &'static str {
+            "wedged"
+        }
+        fn caps(&self) -> crate::model::Caps {
+            crate::model::Caps::default()
+        }
+        fn snapshot(&mut self) -> Snapshot {
+            std::thread::sleep(Duration::from_secs(3600));
+            unreachable!()
+        }
+        fn levels(&mut self) -> crate::backend::Levels {
+            crate::backend::Levels::default()
+        }
+    }
+
+    struct Prompt;
+    impl crate::backend::AudioBackend for Prompt {
+        fn name(&self) -> &'static str {
+            "stub"
+        }
+        fn caps(&self) -> crate::model::Caps {
+            crate::model::Caps::default()
+        }
+        fn snapshot(&mut self) -> Snapshot {
+            crate::demo::snapshot(0)
+        }
+        fn levels(&mut self) -> crate::backend::Levels {
+            crate::backend::Levels::default()
+        }
     }
 
     #[test]

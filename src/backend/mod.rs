@@ -9,6 +9,7 @@ pub mod ffi;
 pub mod input;
 pub mod ioproc;
 pub mod tap;
+pub mod worker;
 
 /// A single level sample, taken at the sampler's rate (~20 Hz) rather than the
 /// state tick's rate (1 Hz).

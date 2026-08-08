@@ -123,30 +123,44 @@ pub const ASCII: Glyphs = Glyphs {
     box_chars: ['-', '|', '+', '+', '+', '+'],
 };
 
-/// An 80x24 logical canvas blitted into a (possibly larger) terminal buffer.
+/// The logical canvas, mapped onto the terminal buffer.
 ///
 /// LITE.md fixes the grid at 80x24 with content in columns 1-78 and says nothing
-/// about other terminal sizes. Larger terminals letterbox the canvas centred;
-/// smaller ones get an explicit message rather than a mangled layout.
+/// about other terminal sizes. This used to letterbox: an 80x24 island in the
+/// middle of whatever you actually had, which on a full-screen terminal wasted
+/// most of the screen and made the meters — the whole point of the tool —
+/// smaller than they needed to be.
+///
+/// The canvas now takes the whole terminal, and 80x24 is the *minimum* rather
+/// than the size. Every column number the spec fixes is preserved exactly at 80
+/// columns and grows from there; see [`crate::ui::Layout`]. Below the minimum
+/// there is still an explicit message rather than a mangled layout.
 pub struct Canvas<'a> {
     buf: &'a mut Buffer,
     ox: u16,
     oy: u16,
+    w: u16,
+    h: u16,
     pub g: Glyphs,
 }
 
-pub const COLS: u16 = 80;
-pub const ROWS: u16 = 24;
-/// Content lives in columns 1..=78; column 0 and 79 are margins.
-pub const CONTENT: Field = Field::new(1, 78);
+/// The smallest terminal that gets a layout instead of an apology.
+pub const MIN_COLS: u16 = 80;
+pub const MIN_ROWS: u16 = 24;
+
+/// Content columns for a canvas `w` wide: 1..=w-2, leaving the spec's one-column
+/// margin on each side. At w=80 this is the spec's `1..=78`, exactly.
+pub const fn content(w: u16) -> Field {
+    Field::new(1, w.saturating_sub(2))
+}
 
 impl<'a> Canvas<'a> {
-    pub fn new(buf: &'a mut Buffer, ox: u16, oy: u16, g: Glyphs) -> Self {
-        Self { buf, ox, oy, g }
+    pub fn new(buf: &'a mut Buffer, ox: u16, oy: u16, w: u16, h: u16, g: Glyphs) -> Self {
+        Self { buf, ox, oy, w, h, g }
     }
 
     fn cell(&mut self, x: u16, y: u16) -> Option<&mut ratatui::buffer::Cell> {
-        if x >= COLS || y >= ROWS {
+        if x >= self.w || y >= self.h {
             return None;
         }
         self.buf.cell_mut((self.ox + x, self.oy + y))
@@ -257,8 +271,8 @@ impl<'a> Canvas<'a> {
 
     /// Fill the whole canvas with the background color.
     pub fn clear(&mut self, bg: Color) {
-        for y in 0..ROWS {
-            for x in 0..COLS {
+        for y in 0..self.h {
+            for x in 0..self.w {
                 if let Some(c) = self.cell(x, y) {
                     c.set_char(' ');
                     c.set_bg(bg);

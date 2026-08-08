@@ -2,11 +2,12 @@
 //!
 //! Two things here differ from LITE.md, both deliberately.
 //!
-//! **Window arithmetic.** The spec asks for "a 60-sample-per-minute ring" driving
-//! a chart that is 78 columns wide and labelled `60s ago -> now`; 60 samples
-//! cannot fill 78 columns. (The reference renderer generates 78.) Resolved by
-//! keeping 78 columns of 60/78 = 769ms each, so the window really is 60 seconds
-//! and one column really is one column.
+//! **Window arithmetic.** The spec asks for "a 60-sample-per-minute ring"
+//! driving a chart that is 78 columns wide and labelled `60s ago -> now`; 60
+//! samples cannot fill 78 columns. (The reference renderer generates 78.)
+//! Resolved by decoupling the two entirely: the ring records at the sampler's
+//! rate and the chart reduces it to whatever width it has. The window really is
+//! 60 seconds at every terminal size, which is what the axis claims.
 //!
 //! **The floor glyph.** The spec's meter algorithm yields a blank column at the
 //! -60 dBFS floor while its sparkline algorithm yields `▁` for the same input —
@@ -19,12 +20,24 @@ use std::collections::VecDeque;
 /// The bottom of the scale. Right for speech and music; the full tool serves
 /// noise-floor work.
 pub const FLOOR_DBFS: f32 = -60.0;
-/// One column per chart cell, content columns 1..=78.
-pub const HISTORY_COLS: usize = 78;
 /// The window the time axis advertises.
 pub const WINDOW_SECS: f32 = 60.0;
-/// Seconds of signal aggregated into one column.
-pub const BUCKET_SECS: f32 = WINDOW_SECS / HISTORY_COLS as f32;
+
+/// Buckets held in the history ring, independent of how wide the chart is.
+///
+/// This used to be 78 — the content width of an 80-column terminal — which
+/// tied the ring to the screen. On a wider terminal that leaves two bad
+/// options: stretch 78 buckets across 200 columns (inventing detail that was
+/// never recorded) or resize the ring on every resize (throwing away the
+/// history you were looking at).
+///
+/// So the ring keeps one bucket per sample at the sampler's rate, and the
+/// renderer reduces it to whatever width the chart happens to be with
+/// [`downsample_max`] — the same reduction the 9-column sparkline already used.
+/// One resolution, recorded once, drawn at any size.
+pub const HISTORY_BUCKETS: usize = 1200;
+/// Seconds of signal aggregated into one bucket: 50 ms, the sampler's period.
+pub const BUCKET_SECS: f32 = WINDOW_SECS / HISTORY_BUCKETS as f32;
 
 /// dB-space normalisation to 0..=1. dBFS is logarithmic and the chart is not;
 /// normalising in dB space before the glyph conversion is what keeps the meter
@@ -103,7 +116,7 @@ impl Default for History {
 impl History {
     pub fn new() -> Self {
         Self {
-            cols: VecDeque::with_capacity(HISTORY_COLS),
+            cols: VecDeque::with_capacity(HISTORY_BUCKETS),
             bucket: f32::NEG_INFINITY,
             bucket_has_sample: false,
             has_data: false,
@@ -111,12 +124,22 @@ impl History {
     }
 
     /// Seed a full window from a pre-built series (used by `--demo`).
+    ///
+    /// The fixtures are authored at chart resolution, not ring resolution, so
+    /// they are stretched across the ring by nearest neighbour. Reducing that
+    /// back down with [`downsample_max`] returns the original shape exactly —
+    /// a max over repeated values is the value — which is what keeps the demo
+    /// screenshots identical to the handoff's while the ring underneath grew.
     pub fn from_series(series: &[f32]) -> Self {
         let mut h = Self::new();
-        for &v in series.iter().rev().take(HISTORY_COLS).rev() {
-            h.cols.push_back(v);
+        if series.is_empty() {
+            return h;
         }
-        h.has_data = !h.cols.is_empty();
+        for i in 0..HISTORY_BUCKETS {
+            let src = i * series.len() / HISTORY_BUCKETS;
+            h.cols.push_back(series[src.min(series.len() - 1)]);
+        }
+        h.has_data = true;
         h
     }
 
@@ -132,7 +155,7 @@ impl History {
     /// carrying the previous peak forward, so a stopped stream visibly decays.
     pub fn commit(&mut self) {
         let v = if self.bucket_has_sample { self.bucket } else { FLOOR_DBFS };
-        if self.cols.len() == HISTORY_COLS {
+        if self.cols.len() == HISTORY_BUCKETS {
             self.cols.pop_front();
         }
         self.cols.push_back(v);
@@ -144,12 +167,18 @@ impl History {
         self.has_data
     }
 
-    /// The window, oldest first, left-padded to [`HISTORY_COLS`] with the floor
-    /// so a freshly started process doesn't draw a misleading full-width chart.
+    /// The window, oldest first, left-padded to [`HISTORY_BUCKETS`] with the
+    /// floor so a freshly started process doesn't draw a misleading full-width
+    /// chart. Reduce to the chart's width with [`downsample_max`].
     pub fn series(&self) -> Vec<f32> {
-        let mut out = vec![FLOOR_DBFS; HISTORY_COLS.saturating_sub(self.cols.len())];
+        let mut out = vec![FLOOR_DBFS; HISTORY_BUCKETS.saturating_sub(self.cols.len())];
         out.extend(self.cols.iter().copied());
         out
+    }
+
+    /// The window reduced to exactly `width` columns, peak-preserving.
+    pub fn columns(&self, width: usize) -> Vec<f32> {
+        downsample_max(&self.series(), width)
     }
 
     /// Peak-hold across the window.
@@ -224,8 +253,11 @@ mod tests {
 
     #[test]
     fn history_window_is_exactly_sixty_seconds() {
-        let cols = HISTORY_COLS as f32;
-        assert!((cols * BUCKET_SECS - WINDOW_SECS).abs() < 1e-4);
+        let buckets = HISTORY_BUCKETS as f32;
+        assert!((buckets * BUCKET_SECS - WINDOW_SECS).abs() < 1e-4);
+        // And one bucket is one sample at the sampler's rate.
+        let sample_secs = 1.0 / crate::app::SAMPLE_HZ as f32;
+        assert!((BUCKET_SECS - sample_secs).abs() < 1e-4, "bucket is {BUCKET_SECS}s");
     }
 
     #[test]
@@ -234,15 +266,43 @@ mod tests {
         h.push_sample(-10.0);
         h.commit();
         let s = h.series();
-        assert_eq!(s.len(), HISTORY_COLS);
+        assert_eq!(s.len(), HISTORY_BUCKETS);
         assert_eq!(*s.last().unwrap(), -10.0);
         assert_eq!(s[0], FLOOR_DBFS);
 
-        for i in 0..HISTORY_COLS + 20 {
+        for i in 0..HISTORY_BUCKETS + 20 {
             h.push_sample(-(i as f32));
             h.commit();
         }
-        assert_eq!(h.series().len(), HISTORY_COLS);
+        assert_eq!(h.series().len(), HISTORY_BUCKETS);
+    }
+
+    /// The ring is one resolution; the chart is whatever the terminal is. The
+    /// reduction has to work at every width, including wider than the ring.
+    #[test]
+    fn the_chart_reduces_to_any_width() {
+        let mut h = History::new();
+        for i in 0..HISTORY_BUCKETS {
+            h.push_sample(if i == 600 { -3.0 } else { -50.0 });
+            h.commit();
+        }
+        for width in [9usize, 78, 200, 400, 1200, 2000] {
+            let c = h.columns(width);
+            assert_eq!(c.len(), width, "width {width}");
+            // The transient survives every reduction — that is the whole point
+            // of reducing by max rather than by mean.
+            let top = c.iter().copied().fold(f32::MIN, f32::max);
+            assert_eq!(top, -3.0, "peak lost at width {width}");
+        }
+    }
+
+    /// A demo fixture authored at 78 columns must come back out at 78 columns
+    /// unchanged, however big the ring underneath it is.
+    #[test]
+    fn fixtures_survive_the_round_trip_through_the_ring() {
+        let src: Vec<f32> = (0..78).map(|i| -60.0 + i as f32 * 0.5).collect();
+        let h = History::from_series(&src);
+        assert_eq!(h.columns(78), src, "fixture changed shape in the ring");
     }
 
     #[test]

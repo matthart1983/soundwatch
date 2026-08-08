@@ -7,8 +7,13 @@
 //! aid, never a substitute for live data — the header says `demo` where the
 //! backend name goes.
 
-use crate::backend::{AudioBackend, Levels};
 use crate::model::{Caps, Device, Direction, Format, Snapshot, Stream, Timestamp};
+
+/// Width the handoff's fixtures were authored at: the content columns of an
+/// 80-column terminal. The history ring is a different, larger resolution, and
+/// `History::from_series` stretches these across it — keeping the demo screens
+/// pixel-identical to the mockups while the ring underneath is free to change.
+pub const FIXTURE_COLS: usize = 78;
 
 /// The mockup's LCG series, reproduced so screenshots line up with the spec.
 pub fn levels(seed: u32, n: usize, avg_db: f32, spread: f32, clip_at: f32) -> Vec<f32> {
@@ -145,13 +150,13 @@ const FIXTURES: &[Fixture] = &[
 
 pub fn stream_series(index: usize) -> Vec<f32> {
     let f = &FIXTURES[index % FIXTURES.len()];
-    levels(f.seed, crate::meter::HISTORY_COLS, f.level, 10.0, -70.0)
+    levels(f.seed, FIXTURE_COLS, f.level, 10.0, -70.0)
 }
 
 pub fn out_series(alert: bool) -> Vec<f32> {
     levels(
         7,
-        crate::meter::HISTORY_COLS,
+        FIXTURE_COLS,
         if alert { -6.0 } else { -16.0 },
         16.0,
         if alert { -0.05 } else { -70.0 },
@@ -159,7 +164,7 @@ pub fn out_series(alert: bool) -> Vec<f32> {
 }
 
 pub fn in_series() -> Vec<f32> {
-    levels(23, crate::meter::HISTORY_COLS, -30.0, 12.0, -70.0)
+    levels(23, FIXTURE_COLS, -30.0, 12.0, -70.0)
 }
 
 fn device(id: u32, name: &str, direction: Direction) -> Device {
@@ -217,37 +222,6 @@ pub fn snapshot(xruns: u32) -> Snapshot {
     }
 }
 
-/// The fixtures behind the [`AudioBackend`] trait.
-///
-/// `--demo` used to run against a live `CoreAudio`, which meant it created a
-/// process tap and a private aggregate device on a machine whose whole purpose
-/// in that moment was *not* to touch the audio system. It is also the mode you
-/// are told to fall back to when consent is unavailable, so it must work
-/// without any.
-#[derive(Debug, Default)]
-pub struct DemoBackend {
-    xruns: u32,
-}
-
-impl AudioBackend for DemoBackend {
-    fn name(&self) -> &'static str {
-        "demo"
-    }
-
-    fn caps(&self) -> Caps {
-        snapshot(self.xruns).caps
-    }
-
-    fn snapshot(&mut self) -> Snapshot {
-        snapshot(self.xruns)
-    }
-
-    fn levels(&mut self) -> Levels {
-        // The App drives demo meters from the seeded series, not from here.
-        Levels::default()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,7 +231,7 @@ mod tests {
         let a = out_series(false);
         let b = out_series(false);
         assert_eq!(a, b);
-        assert_eq!(a.len(), crate::meter::HISTORY_COLS);
+        assert_eq!(a.len(), FIXTURE_COLS);
         assert!(a.iter().all(|v| (crate::meter::FLOOR_DBFS..=0.0).contains(v)));
     }
 

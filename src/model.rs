@@ -129,6 +129,27 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
+    /// What the screen shows before the backend has answered once.
+    ///
+    /// There is always a first frame, and on a machine where consent is
+    /// pending there may be nothing but first frames for a while. Rendering
+    /// something honest immediately beats a black terminal that looks hung.
+    pub fn starting(backend: &'static str, host: String) -> Self {
+        Self {
+            backend,
+            host,
+            default_out: None,
+            default_in: None,
+            streams: Vec::new(),
+            xruns_60s: 0,
+            caps: Caps {
+                note: Some("reading the audio system\u{2026}".into()),
+                ..Default::default()
+            },
+            at: Timestamp::now(),
+        }
+    }
+
     /// Computed round-trip latency: capture chain plus playback chain.
     ///
     /// With no input device there is no round trip, so this reports the output

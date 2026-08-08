@@ -18,6 +18,7 @@ mod backend;
 mod demo;
 mod fmt;
 mod grid;
+mod layout;
 mod meter;
 mod model;
 mod tcc;
@@ -144,26 +145,36 @@ fn main() {
 
     // --demo drives the fixtures and must not open, tap or even enumerate a
     // real device: it is the state you fall back to when consent is refused.
-    let backend: Box<dyn AudioBackend> = if args.demo {
-        Box::new(demo::DemoBackend::default())
-    } else {
-        Box::new(CoreAudio::new(backend::Metering {
-            output: wants_metering,
-            input: wants_metering && args.meter_input,
-        }))
-    };
-    let mut app = App::new(backend, args.demo, args.ascii);
-
-    if let Some(state) = args.once {
-        match render_once(&mut app, &state, args.color) {
-            Ok(s) => print!("{s}"),
-            Err(e) => {
-                eprintln!("soundwatch-lite: {e}");
-                std::process::exit(2);
-            }
+    if args.demo {
+        let mut app = App::demo(args.ascii);
+        if let Some(state) = args.once {
+            return once(&mut app, &state, args.color);
+        }
+        if let Err(e) = run(&mut app) {
+            eprintln!("soundwatch-lite: {e}");
+            std::process::exit(1);
         }
         return;
     }
+
+    let metering =
+        backend::Metering { output: wants_metering, input: wants_metering && args.meter_input };
+
+    // --once is a one-shot render, so it reads the backend synchronously: there
+    // is no UI to keep responsive and no second frame to wait for.
+    if let Some(state) = args.once {
+        let mut be = CoreAudio::new(metering);
+        let mut app = App::snapshot_only(be.snapshot(), args.ascii);
+        return once(&mut app, &state, args.color);
+    }
+
+    // Live: the backend goes on its own thread and the UI never touches
+    // CoreAudio. See backend::worker for what happens when it does.
+    let be = CoreAudio::new(metering);
+    let name = be.name();
+    let host = backend::ffi::hostname();
+    let mut app =
+        App::live(backend::worker::BackendWorker::spawn(Box::new(be)), name, host, args.ascii);
 
     if let Err(e) = run(&mut app) {
         eprintln!("soundwatch-lite: {e}");
@@ -178,6 +189,16 @@ fn main() {
 /// zero. Nothing in the CoreAudio return codes distinguishes that from a silent
 /// machine, so the probe separates "no callbacks", "callbacks but digital
 /// silence" and "working" by inspection.
+fn once(app: &mut App, state: &str, color: bool) {
+    match render_once(app, state, color) {
+        Ok(s) => print!("{s}"),
+        Err(e) => {
+            eprintln!("soundwatch-lite: {e}");
+            std::process::exit(2);
+        }
+    }
+}
+
 fn probe_tap(identity_error: Option<&str>) {
     use backend::tap::LevelTap;
 
@@ -260,6 +281,13 @@ fn run(app: &mut App) -> io::Result<()> {
     let mut term = Terminal::new(backend)?;
 
     let result = loop {
+        // Adopt the terminal's size before drawing, so a resize takes effect on
+        // the frame the user sees it and the selection is clamped against the
+        // same list height that is about to be drawn.
+        match term.size() {
+            Ok(s) => app.set_viewport(s.width, s.height),
+            Err(e) => break Err(e),
+        }
         if let Err(e) = term.draw(|f| {
             let area = f.area();
             ui::render(app, f.buffer_mut(), area);
@@ -278,6 +306,7 @@ fn run(app: &mut App) -> io::Result<()> {
             Ok(false) => {}
             Err(e) => break Err(e),
         }
+        app.poll_backend();
         app.sample();
         app.tick();
         if app.should_quit {
@@ -299,6 +328,18 @@ fn restore() -> io::Result<()> {
 /// layout is checked against the spec's row and column numbers without a
 /// terminal, and it is what the grid tests assert on.
 fn render_once(app: &mut App, state: &str, color: bool) -> Result<String, String> {
+    render_once_at(app, state, color, grid::MIN_COLS, grid::MIN_ROWS)
+}
+
+/// The same, at an explicit size. The tests drive this at several sizes; the
+/// layout being right at 80x24 says nothing about it being right at 200x60.
+fn render_once_at(
+    app: &mut App,
+    state: &str,
+    color: bool,
+    w: u16,
+    h: u16,
+) -> Result<String, String> {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let press = |c: KeyCode| KeyEvent::new(c, KeyModifiers::NONE);
 
@@ -322,7 +363,8 @@ fn render_once(app: &mut App, state: &str, color: bool) -> Result<String, String
         other => return Err(format!("unknown state: {other}")),
     }
 
-    let area = Rect::new(0, 0, grid::COLS, grid::ROWS);
+    let area = Rect::new(0, 0, w, h);
+    app.set_viewport(w, h);
     let mut buf = Buffer::empty(area);
     ui::render(app, &mut buf, area);
     Ok(buffer_to_string(&buf, color))
@@ -367,38 +409,39 @@ fn ansi(fg: Color, bg: Color, m: Modifier) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::Levels;
-    use crate::model::{Caps, Snapshot};
-
-    struct Fake;
-    impl AudioBackend for Fake {
-        fn name(&self) -> &'static str {
-            "demo"
-        }
-        fn caps(&self) -> Caps {
-            Caps::default()
-        }
-        fn snapshot(&mut self) -> Snapshot {
-            demo::snapshot(0)
-        }
-        fn levels(&mut self) -> Levels {
-            Levels::default()
-        }
-    }
 
     fn frame(state: &str) -> Vec<String> {
-        let mut app = App::new(Box::new(Fake), true, false);
-        let s = render_once(&mut app, state, false).expect("render");
+        frame_at(state, grid::MIN_COLS, grid::MIN_ROWS)
+    }
+
+    fn frame_at(state: &str, w: u16, h: u16) -> Vec<String> {
+        let mut app = App::demo(false);
+        let s = render_once_at(&mut app, state, false, w, h).expect("render");
         s.lines().map(str::to_owned).collect()
+    }
+
+    /// Sizes worth checking: the spec's minimum, one column and one row above
+    /// it (where the surplus-sharing arithmetic first does anything), an
+    /// awkward prime-ish size, and a plausible full screen.
+    const SIZES: &[(u16, u16)] =
+        &[(80, 24), (81, 25), (97, 31), (120, 40), (160, 50), (203, 61), (300, 80)];
+
+    /// The spec's layout, for the tests that assert the spec's row numbers.
+    fn spec() -> crate::layout::Layout {
+        crate::layout::Layout::new(grid::MIN_COLS, grid::MIN_ROWS)
     }
 
     /// Every rendered line must fit the grid. This is the regression test for
     /// the whole class of overflow defects found in the spec review.
     fn assert_within_grid(lines: &[String]) {
-        assert_eq!(lines.len(), grid::ROWS as usize, "wrong row count");
+        assert_grid(lines, grid::MIN_COLS, grid::MIN_ROWS);
+    }
+
+    fn assert_grid(lines: &[String], w: u16, h: u16) {
+        assert_eq!(lines.len(), h as usize, "wrong row count at {w}x{h}");
         for (i, l) in lines.iter().enumerate() {
-            let w = grid::width(l);
-            assert!(w <= grid::COLS, "row {i} is {w} columns wide: {l:?}");
+            let got = grid::width(l);
+            assert!(got <= w, "at {w}x{h}, row {i} is {got} columns wide: {l:?}");
         }
     }
 
@@ -409,25 +452,113 @@ mod tests {
         }
     }
 
+    /// The regression test for the whole class of overflow defects, now at
+    /// every size rather than only the one the spec drew.
+    #[test]
+    fn every_state_fits_every_terminal_size() {
+        for &(w, h) in SIZES {
+            for state in ["main", "paused", "filter", "detail", "alert", "help"] {
+                assert_grid(&frame_at(state, w, h), w, h);
+            }
+        }
+    }
+
+    /// A wider terminal has to actually be used, not letterboxed. The meters
+    /// span the content field, so the axis rule is the honest witness: it is
+    /// drawn edge to edge and nothing else on that row is elastic.
+    #[test]
+    fn a_bigger_terminal_is_filled_not_letterboxed() {
+        for &(w, h) in SIZES {
+            let f = frame_at("main", w, h);
+            let axis = f
+                .iter()
+                .find(|l| l.contains("60s ago") && l.contains("now"))
+                .unwrap_or_else(|| panic!("no time axis at {w}x{h}"));
+            // Content is columns 1..=w-2, and the axis ends in a space that
+            // trim_end takes, so a full-width rule measures w-2.
+            assert_eq!(grid::width(axis), w - 2, "at {w}x{h} the axis stops short: {axis:?}");
+            let footer = f.last().expect("a footer");
+            assert!(footer.contains("q quit"), "at {w}x{h}: {footer:?}");
+            assert!(
+                footer.contains("soundwatch-lite"),
+                "version not pinned to the right edge at {w}x{h}: {footer:?}"
+            );
+        }
+    }
+
+    /// A crowded list, which is the normal case on a desktop and the one the
+    /// eight-row fixture never exercises.
+    fn crowded_frame_at(w: u16, h: u16) -> Vec<String> {
+        let mut app = App::demo(false);
+        let template = app.snap.streams[0].clone();
+        for i in 0..40 {
+            let mut s = template.clone();
+            s.key = format!("extra:{i}");
+            s.app = format!("extra{i}");
+            app.snap.streams.push(s);
+        }
+        let s = render_once_at(&mut app, "main", false, w, h).expect("render");
+        s.lines().map(str::to_owned).collect()
+    }
+
+    /// Taller terminals must show more streams, not more blank rows.
+    #[test]
+    fn a_taller_terminal_shows_more_streams() {
+        // Count the rows actually drawn between the table rule and the prompt.
+        let drawn = |w: u16, h: u16| {
+            let l = crate::layout::Layout::new(w, h);
+            let f = crowded_frame_at(w, h);
+            (l.row_table_rule as usize + 1..l.row_prompt as usize)
+                .filter(|&i| !f[i].trim().is_empty())
+                .count()
+        };
+        let short = drawn(80, 24);
+        let tall = drawn(80, 60);
+        assert_eq!(short, 8, "the spec's list is eight rows");
+        assert!(
+            tall > short,
+            "a 60-row terminal drew {tall} stream rows, a 24-row one drew {short}"
+        );
+    }
+
+    /// And the surplus reaches the meters too, not only the list.
+    #[test]
+    fn a_taller_terminal_grows_the_meters() {
+        let head = |f: &[String]| {
+            f.iter().position(|l| l.contains("APP") && l.contains("DEVICE")).expect("table head")
+        };
+        let short = head(&frame_at("main", 80, 24));
+        let tall = head(&frame_at("main", 80, 60));
+        assert!(tall > short, "the meters did not grow into a taller terminal");
+        // The footer stays pinned to the last row at every height.
+        for &(w, h) in SIZES {
+            let f = frame_at("main", w, h);
+            assert!(
+                f[h as usize - 1].contains("q quit"),
+                "footer is not on the last row at {w}x{h}"
+            );
+        }
+    }
+
     #[test]
     fn the_spec_rows_hold_their_content() {
         let f = frame("main");
-        assert!(f[ui::ROW_HEADER as usize].starts_with(" soundwatch"));
-        assert!(f[ui::ROW_OUT_LABEL as usize].contains("dBFS out"));
-        assert!(f[ui::ROW_IN_LABEL as usize].contains("dBFS in"));
-        assert!(f[ui::ROW_AXIS as usize].contains("60s ago"));
-        assert!(f[ui::ROW_AXIS as usize].contains("now"));
-        assert!(f[ui::ROW_VITALS as usize].contains("all nominal"));
-        assert!(f[ui::ROW_TABLE_HEAD as usize].contains("APP"));
-        assert!(f[ui::ROW_TABLE_HEAD as usize].contains("60s"));
-        assert!(f[ui::ROW_FOOTER as usize].contains("q quit"));
-        assert!(f[ui::ROW_FOOTER as usize].contains("soundwatch-lite"));
+        assert!(f[spec().row_header as usize].starts_with(" soundwatch"));
+        assert!(f[spec().row_out_label as usize].contains("dBFS out"));
+        assert!(f[spec().row_in_label as usize].contains("dBFS in"));
+        assert!(f[spec().row_axis as usize].contains("60s ago"));
+        assert!(f[spec().row_axis as usize].contains("now"));
+        assert!(f[spec().row_vitals as usize].contains("all nominal"));
+        assert!(f[spec().row_table_head as usize].contains("APP"));
+        assert!(f[spec().row_table_head as usize].contains("60s"));
+        assert!(f[spec().row_footer as usize].contains("q quit"));
+        assert!(f[spec().row_footer as usize].contains("soundwatch-lite"));
     }
 
     #[test]
     fn table_columns_sit_where_the_family_says() {
         let f = frame("main");
-        let head = &f[ui::ROW_TABLE_HEAD as usize];
+        let head = &f[spec().row_table_head as usize];
         // Columns are 1-indexed in the spec, so subtract one for a byte offset.
         assert_eq!(head.find("APP"), Some(1));
         assert_eq!(head.find("DEVICE"), Some(17));
@@ -442,7 +573,7 @@ mod tests {
     fn the_alert_state_never_collides_vitals_with_the_verdict() {
         let f = frame("alert");
         assert_within_grid(&f);
-        let vitals = &f[ui::ROW_VITALS as usize];
+        let vitals = &f[spec().row_vitals as usize];
         assert!(vitals.contains("xruns 14"), "missing xrun count: {vitals:?}");
         assert!(vitals.contains("buffer too small"), "missing verdict: {vitals:?}");
         // There must be whitespace between the last vital and the verdict.
@@ -453,7 +584,7 @@ mod tests {
     #[test]
     fn filter_shows_a_derived_count() {
         let f = frame("filter");
-        let prompt = &f[ui::ROW_PROMPT as usize];
+        let prompt = &f[spec().row_prompt as usize];
         // '/' at column 1, query at column 3 — the spec's own spacing.
         assert_eq!(prompt.find('/'), Some(1), "{prompt:?}");
         assert_eq!(prompt.find("zoom"), Some(3), "{prompt:?}");
@@ -464,9 +595,9 @@ mod tests {
     #[test]
     fn detail_opens_a_three_row_block_under_a_five_row_list() {
         let f = frame("detail");
-        assert!(f[ui::ROW_DETAIL as usize].contains("pid "));
-        assert!(f[ui::ROW_DETAIL as usize + 1].contains("Hz"));
-        assert!(f[ui::ROW_DETAIL as usize + 2].contains("latency"));
+        assert!(f[spec().row_detail() as usize].contains("pid "));
+        assert!(f[spec().row_detail() as usize + 1].contains("Hz"));
+        assert!(f[spec().row_detail() as usize + 2].contains("latency"));
         // Rows 19-21 are the detail block, so the list stops at 18. The block is
         // anchored by the tree corner at column 3.
         assert_eq!(f[19].find('\u{2514}'), Some(3), "corner glyph misplaced: {:?}", f[19]);
@@ -475,7 +606,7 @@ mod tests {
     #[test]
     fn paused_says_so() {
         let f = frame("paused");
-        assert!(f[ui::ROW_HEADER as usize].contains("PAUSED"));
+        assert!(f[spec().row_header as usize].contains("PAUSED"));
     }
 
     #[test]
@@ -490,9 +621,13 @@ mod tests {
     fn overflow_is_reported_rather_than_silently_dropped() {
         let f = frame("main");
         // The fixture has 8 streams in 8 rows, so no range indicator.
-        assert!(!f[ui::ROW_PROMPT as usize].contains(" of 8"));
+        assert!(!f[spec().row_prompt as usize].contains(" of 8"));
         // In detail the list shrinks to 5, which must be disclosed.
         let d = frame("detail");
-        assert!(d[ui::ROW_PROMPT as usize].contains("of 8"), "{:?}", d[ui::ROW_PROMPT as usize]);
+        assert!(
+            d[spec().row_prompt as usize].contains("of 8"),
+            "{:?}",
+            d[spec().row_prompt as usize]
+        );
     }
 }

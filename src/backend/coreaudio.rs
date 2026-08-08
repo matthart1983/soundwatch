@@ -557,8 +557,11 @@ impl AudioBackend for CoreAudio {
             requested_format: false,
             xruns: true,
             hold_is_since_launch: true,
-            // Notes must fit the 78-column content width.
-            note: note.map(|n| crate::grid::truncate(&n, crate::grid::CONTENT.width()).to_string()),
+            // Not truncated here: the renderer clips row 11 to whatever the
+            // terminal is, and a note that needed truncating at 78 columns
+            // would still be wrong on a wide screen. The requirement is that
+            // these fit the *smallest* supported screen, which is a test.
+            note,
         }
     }
 
@@ -694,7 +697,7 @@ mod tests {
         let be = observer();
         let note = be.caps().note.expect("a degraded field needs an explanation");
         assert!(
-            crate::grid::width(&note) <= crate::grid::CONTENT.width(),
+            crate::grid::width(&note) <= crate::grid::content(crate::grid::MIN_COLS).width(),
             "note is {} columns: {note:?}",
             crate::grid::width(&note)
         );
@@ -715,7 +718,7 @@ mod tests {
             be.tap = Pending::Failed(err);
             let note = be.caps().note.expect("a degraded field needs an explanation");
             assert!(
-                crate::grid::width(&note) <= crate::grid::CONTENT.width(),
+                crate::grid::width(&note) <= crate::grid::content(crate::grid::MIN_COLS).width(),
                 "{what} note is {} columns: {note:?}",
                 crate::grid::width(&note)
             );
