@@ -22,6 +22,50 @@ pub const VERSION: &str = concat!("soundwatch-lite ", env!("CARGO_PKG_VERSION"))
 /// What the footer falls back to when the full string will not fit.
 pub const SHORT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// A compact meter for the Overview tab: the label row and a short chart.
+/// Returns the row after it.
+pub fn mini_meter(c: &mut Canvas, l: &Layout, app: &App, top: u16, rows: u16, input: bool) -> u16 {
+    let (dev, hist, base, live, unit) = if input {
+        (
+            app.snap.default_in.as_ref(),
+            &app.in_hist,
+            theme::CYAN,
+            app.snap.caps.input_levels,
+            "dBFS in",
+        )
+    } else {
+        (
+            app.snap.default_out.as_ref(),
+            &app.out_hist,
+            theme::GREEN,
+            app.snap.caps.device_levels,
+            "dBFS out",
+        )
+    };
+    let glyph = if input { c.g.inp } else { c.g.out };
+    let live = live && dev.is_some();
+    meter_label(
+        c,
+        l,
+        app,
+        top,
+        glyph,
+        base,
+        unit,
+        hist,
+        live,
+        dev.map(|d| fmt::rate_bits(d.format.rate, d.format.bits)),
+        dev.map(|d| d.name.clone()),
+    );
+    meter_body(c, l, app, MeterView { top: top + 1, h: rows, hist, base, live });
+    top + 1 + rows
+}
+
+/// The spectrum graph, for the Spectrum tab.
+pub fn spectrum_body(c: &mut Canvas, l: &Layout, app: &App) {
+    spectrum(c, l, app);
+}
+
 pub fn render(app: &App, buf: &mut Buffer, area: Rect) {
     if area.width < MIN_COLS || area.height < MIN_ROWS {
         too_small(buf, area);
@@ -34,6 +78,25 @@ pub fn render(app: &App, buf: &mut Buffer, area: Rect) {
         Canvas::new(buf, area.x, area.y, l.w.min(area.width), l.h.min(area.height), app.glyphs);
 
     c.clear(theme::BG);
+
+    // The full product: chrome plus whichever tab is active. Lite keeps the
+    // handoff's single screen, which is what its row numbers are pinned to.
+    if l.chrome == crate::layout::Chrome::Tabs {
+        header_full(&mut c, &l, app);
+        crate::tabs::bar(&mut c, &l, app);
+        crate::tabs::body(&mut c, &l, app);
+        c.rule(l.content, l.row_footer_rule, theme::FAINT);
+        prompt(&mut c, &l, app);
+        footer(&mut c, &l, app);
+        if app.mode == Mode::Help {
+            help(&mut c, &l, app);
+        }
+        if app.mode == Mode::Settings {
+            settings(&mut c, &l, app);
+        }
+        return;
+    }
+
     header(&mut c, &l, app);
     if app.spectrum.source.is_on() {
         // Spectrum replaces the meters, the axis, the vitals, the note and the
@@ -77,6 +140,40 @@ fn too_small(buf: &mut Buffer, area: Rect) {
 }
 
 // ── row 0 ────────────────────────────────────────────────────────────────────
+
+/// The full product's header: identity on the left, state on the right.
+fn header_full(c: &mut Canvas, l: &Layout, app: &App) {
+    let f = l.content;
+    let live = !app.paused;
+    let dot_fg = if app.verdict.is_alert() {
+        theme::RED
+    } else if live {
+        theme::GREEN
+    } else {
+        theme::YELLOW
+    };
+    let x = c.text(f, f.x0, l.row_header, c.g.dot, dot_fg, false);
+    let x = c.text(f, x + 1, l.row_header, "SoundWatch", theme::CYAN, true);
+    let x = c.text(f, x + 1, l.row_header, SHORT_VERSION, theme::DIM, false);
+    let x = c.text(f, x + 2, l.row_header, "\u{2502}", theme::FAINT, false);
+    let x = c.text(f, x + 2, l.row_header, "host", theme::DIM, false);
+    let x = c.text(f, x + 1, l.row_header, &app.snap.host, theme::FG, false);
+    let x = c.text(f, x + 2, l.row_header, app.snap.backend, theme::DIM, false);
+
+    // Right group: the verdict, then the state word.
+    let (word, fg) = if app.paused {
+        ("PAUSED", theme::YELLOW)
+    } else if let Verdict::Alert { .. } = &app.verdict {
+        ("ALERT", theme::RED)
+    } else {
+        ("LIVE", theme::GREEN)
+    };
+    c.right(f, l.row_header, word, fg);
+    if let Verdict::Alert { headline, .. } = &app.verdict {
+        let room = f.x1.saturating_sub(width(word) + 2);
+        c.right(Field::new(x + 2, room), l.row_header, headline, theme::RED);
+    }
+}
 
 fn header(c: &mut Canvas, l: &Layout, app: &App) {
     let (right, right_fg, dot) = if app.paused {
@@ -584,13 +681,18 @@ fn footer(c: &mut Canvas, l: &Layout, app: &App) {
         &[
             ("q", "quit"),
             ("p", "pause"),
-            ("s", "spectrum"),
+            ("1-0", "tab"),
             (",", "settings"),
             ("/", "filter"),
             ("\u{21B5}", "detail"),
             ("?", "help"),
         ]
     };
+    // Lite has no tabs, so it advertises the spectrum key in that slot.
+    let lite_keys: Vec<(&str, &str)> =
+        all.iter().map(|(k, v)| if *k == "1-0" { ("s", "spectrum") } else { (*k, *v) }).collect();
+    let all: &[(&str, &str)] =
+        if l.chrome == crate::layout::Chrome::Lite { &lite_keys } else { all };
 
     // Seven keys and a version string do not fit 80 columns, and the spec puts
     // both on this row. Two things give way in order: the version drops its

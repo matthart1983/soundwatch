@@ -269,6 +269,11 @@ impl LevelTap {
         self.meter.as_ref().map(IoProcMeter::overruns).unwrap_or(0)
     }
 
+    /// RMS since the last call, in dBFS.
+    pub fn rms_dbfs(&self) -> Option<f32> {
+        self.meter.as_ref()?.rms_dbfs()
+    }
+
     /// The most recent `n` samples of the mono mixdown, for the spectrum.
     pub fn recent(&self, n: usize) -> Option<Vec<f32>> {
         self.meter.as_ref()?.recent(n)

@@ -50,7 +50,9 @@ jobs:
 
       - name: Renders without a terminal
         run: |
-          for state in main paused filter detail help spectrum settings; do
+          for state in main paused filter detail help settings \
+                       overview devices streams meters spectrum \
+                       latency xruns routing timeline insights; do
             ./target/release/soundwatch-lite --once "$state" --no-color > /dev/null
           done
           ./target/release/soundwatch-lite --demo --once alert --no-color > /dev/null

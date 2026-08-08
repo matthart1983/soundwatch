@@ -8,10 +8,11 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::backend::worker::{BackendWorker, Update};
 use crate::config::{Config, Setting};
 use crate::grid::{ASCII, Glyphs, UNICODE};
-use crate::layout::Layout;
+use crate::layout::{Chrome, Layout};
 use crate::meter::{self, History};
 use crate::model::{Snapshot, Stream, Verdict, verdict};
 use crate::spectrum::{Source, Spectrum};
+use crate::tabs::Tab;
 use crate::theme::Theme;
 
 /// Meter sampling rate. The full tool meters at 60 Hz; Lite's chart advances one
@@ -63,6 +64,10 @@ pub struct App {
     pub scroll: usize,
     pub out_hist: History,
     pub in_hist: History,
+    /// RMS history, for the Meters tab's crest factor. Peak alone cannot say
+    /// how loud something is, only whether it is about to clip.
+    pub out_rms: History,
+    pub in_rms: History,
     pub stream_hist: HashMap<String, History>,
     pub glyphs: Glyphs,
     /// Everything the settings menu can change.
@@ -77,6 +82,8 @@ pub struct App {
     pub layout: Layout,
     /// The spectrum screen. Off by default; `s` cycles it.
     pub spectrum: Spectrum,
+    /// The active tab in the full product.
+    pub tab: Tab,
     pub demo: bool,
     pub should_quit: bool,
     last_tick: Instant,
@@ -126,13 +133,20 @@ impl App {
             scroll: 0,
             out_hist: History::new(),
             in_hist: History::new(),
+            out_rms: History::new(),
+            in_rms: History::new(),
             stream_hist: HashMap::new(),
             glyphs: if cfg.ascii { ASCII } else { UNICODE },
             cfg,
             setting: 0,
             save_status: None,
-            layout: Layout::new(crate::grid::MIN_COLS, crate::grid::MIN_ROWS),
+            layout: if cfg.lite {
+                Layout::lite(crate::grid::MIN_COLS, crate::grid::MIN_ROWS)
+            } else {
+                Layout::new(crate::grid::MIN_COLS, crate::grid::MIN_ROWS, Chrome::Tabs)
+            },
             spectrum: Spectrum::default(),
+            tab: Tab::default(),
             demo,
             should_quit: false,
             last_tick: Instant::now(),
@@ -167,6 +181,13 @@ impl App {
         let alert = self.demo_xruns > 0;
         self.out_hist = History::from_series(&crate::demo::out_series(alert));
         self.in_hist = History::from_series(&crate::demo::in_series());
+        // RMS sits below peak by the crest factor; the fixtures model that.
+        self.out_rms = History::from_series(
+            &crate::demo::out_series(alert).iter().map(|v| v - 9.0).collect::<Vec<_>>(),
+        );
+        self.in_rms = History::from_series(
+            &crate::demo::in_series().iter().map(|v| v - 12.0).collect::<Vec<_>>(),
+        );
         for (i, s) in self.snap.streams.iter().enumerate() {
             self.stream_hist
                 .insert(s.key.clone(), History::from_series(&crate::demo::stream_series(i)));
@@ -221,6 +242,12 @@ impl App {
                     if let Some(d) = l.in_dbfs {
                         self.in_hist.push_sample(d);
                     }
+                    if let Some(d) = l.out_rms_dbfs {
+                        self.out_rms.push_sample(d);
+                    }
+                    if let Some(d) = l.in_rms_dbfs {
+                        self.in_rms.push_sample(d);
+                    }
                     for s in &self.snap.streams {
                         if let Some(d) = s.level_dbfs {
                             self.stream_hist.entry(s.key.clone()).or_default().push_sample(d);
@@ -261,6 +288,8 @@ impl App {
             if !self.demo {
                 self.out_hist.commit();
                 self.in_hist.commit();
+                self.out_rms.commit();
+                self.in_rms.commit();
                 for h in self.stream_hist.values_mut() {
                     h.commit();
                 }
@@ -330,6 +359,9 @@ impl App {
     /// change-detection path that could miss one.
     pub fn apply_config(&mut self) {
         self.glyphs = if self.cfg.ascii { ASCII } else { UNICODE };
+        // The chrome changes the row numbers under everything.
+        self.layout = Layout::new(self.layout.w, self.layout.h, self.chrome());
+        self.clamp_selection();
         self.spectrum.configure(&self.cfg);
         if let Some(w) = &self.worker {
             w.want_input_meter(self.cfg.meter_input);
@@ -346,12 +378,17 @@ impl App {
     /// Adopt a new terminal size. Called once per frame before drawing, so a
     /// resize takes effect on the same frame the user sees it.
     pub fn set_viewport(&mut self, w: u16, h: u16) {
-        let next = Layout::new(w, h);
+        let next = Layout::new(w, h, self.chrome());
         if next != self.layout {
             self.layout = next;
             // A shorter list can strand the selection off the bottom.
             self.clamp_selection();
         }
+    }
+
+    /// Which chrome the screen wears, from the settings.
+    pub fn chrome(&self) -> Chrome {
+        if self.cfg.lite { Chrome::Lite } else { Chrome::Tabs }
     }
 
     /// Rows the table can show in the current mode.
@@ -387,6 +424,35 @@ impl App {
         }
         let cur = self.sel as isize;
         self.sel = (cur + delta).clamp(0, n as isize - 1) as usize;
+        self.clamp_selection();
+    }
+
+    /// Switch tabs, resetting the per-tab selection.
+    ///
+    /// The selection index is shared, and the tabs it means different things on
+    /// have wildly different lengths — carrying row 30 of the device list into
+    /// a three-row insight view would land on nothing.
+    pub fn select_tab(&mut self, t: Tab) {
+        if t == self.tab {
+            return;
+        }
+        self.tab = t;
+        self.sel = 0;
+        self.scroll = 0;
+        // The spectrum tab is the spectrum: opening it starts the audio, and
+        // leaving it stops shipping windows nobody is looking at.
+        let want = if t == Tab::Spectrum {
+            if self.spectrum.source.is_on() { self.spectrum.source } else { Source::Output }
+        } else {
+            Source::Off
+        };
+        if want != self.spectrum.source {
+            self.spectrum.source = want;
+            self.spectrum.reset();
+        }
+        if let Some(w) = &self.worker {
+            w.want_audio(want);
+        }
         self.clamp_selection();
     }
 
@@ -484,8 +550,22 @@ impl App {
             return;
         }
 
+        // Digits pick a tab in the full product. Checked before the rest so a
+        // tab key never collides with a screen-specific one.
+        if !self.cfg.lite
+            && let KeyCode::Char(ch) = k.code
+            && let Some(t) = Tab::from_digit(ch)
+        {
+            self.select_tab(t);
+            return;
+        }
+
         match k.code {
             KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Tab | KeyCode::Right if !self.cfg.lite => self.select_tab(self.tab.next(1)),
+            KeyCode::BackTab | KeyCode::Left if !self.cfg.lite => {
+                self.select_tab(self.tab.next(-1))
+            }
             KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.should_quit = true
             }
@@ -557,8 +637,9 @@ impl App {
 mod tests {
     use super::*;
 
+    /// The Lite chrome, because these tests pin the Lite spec's row budget.
     fn app() -> App {
-        App::demo(Config::default())
+        App::demo(Config { lite: true, ..Default::default() })
     }
 
     fn key(c: KeyCode) -> KeyEvent {

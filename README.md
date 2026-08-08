@@ -1,11 +1,42 @@
-# SoundWatch Lite
+# SoundWatch
 
-A read-only audio diagnostics TUI. One screen, six keys, four colours — 80×24
-is the minimum, and it fills whatever terminal you give it.
-
-Fourth member of the Lite family after NetWatch Lite, SysWatch Lite and DiskWatch
-Lite, and built to the `design_handoff_soundwatch` spec. It answers one question:
+A read-only audio diagnostics TUI for macOS. Ten tabs, one question:
 **why does my audio sound wrong?**
+
+Fourth member of the family after NetWatch, SysWatch and DiskWatch. The
+single-screen **Lite** original is still here behind `--lite`, at the
+`design_handoff_soundwatch` spec's exact rows and columns.
+
+```
+● SoundWatch 0.1.0  │  host jules-mbp  coreaudio                          LIVE
+[1] Overview [2] Devices 6 [3] Streams 8 [4] Meters [5] Spectrum [6] Latency …
+┘           └───────────────────────────────────────────────────────────────────
+ OUTPUT         RATE           BUFFER         LATENCY        XRUNS 60s
+ -13.1          48k/24         128fr          11.8ms         0
+```
+
+| # | tab | what it answers |
+|---|---|---|
+| 1 | Overview | is anything wrong right now |
+| 2 | Devices | what exists, how it is attached, what it is running at |
+| 3 | Streams | which app has the microphone, and what is making that noise |
+| 4 | Meters | peak *and* RMS, and the crest factor between them |
+| 5 | Spectrum | what is *in* the signal — hum, band limits, DC |
+| 6 | Latency | where the milliseconds actually went |
+| 7 | Xruns | when it dropped out, on which device |
+| 8 | Routing | what your "device" is really built out of |
+| 9 | Timeline | what changed while you were not looking |
+| 0 | Insights | all of the above, in plain English |
+
+`1`–`0` select a tab, `Tab`/`⇧Tab` walk them.
+
+**On the tab list.** There is no `design_handoff_soundwatch` for the full
+product — only the Lite one. The chrome here is the family's, taken from
+`design_handoff_syswatch/source/syswatch/sw-chrome.jsx` down to the active
+tab's `┘ └` inset. The ten tabs are *derived* from the family taxonomy
+(Overview first, Insights last, Timeline beside it) applied to the audio
+domain. They are not specified, and this file says so rather than implying
+otherwise.
 
 ```
  soundwatch  Mac · coreaudio                                   ● 48k/32 · 512fr
@@ -48,6 +79,7 @@ cargo run -- --demo   # the design fixtures — touches no audio device at all
 | `--meter-input` | also meter the default input device (see [Input](#input-is-opt-in)) |
 | `--theme <name>` | `spec` (default) or `btop` — see [Themes](#themes) |
 | `--defaults` | ignore the saved settings for this run |
+| `--lite` | the original single screen, at the handoff's exact rows |
 | `--ascii` | ASCII stand-ins for glyphs that are not reliably single-width |
 | `--once <state>` | render `main`, `paused`, `filter`, `detail`, `alert`, `help`, `spectrum` or `settings` and exit |
 | `--no-color` | with `--once`, emit plain text |
@@ -439,6 +471,7 @@ than a mangled layout.
 | `spectrum.rs` | log frequency mapping, analyser ballistics, and the fault detectors |
 | `chart.rs` | bar charts in blocks or braille, shared by the meters and the spectrum |
 | `config.rs` | every setting, the `,` menu's model, and the file it is saved in |
+| `tabs/` | the ten tabs and the chrome around them |
 | `backend/worker.rs` | the backend on its own thread, so a stalled HAL cannot freeze the UI |
 | `backend/ioproc.rs` | the real-time peak callback both meters attach through |
 | `backend/tap.rs` | the output process tap and its private aggregate device |

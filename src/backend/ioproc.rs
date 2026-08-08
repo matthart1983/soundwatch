@@ -75,6 +75,15 @@ pub struct MeterState {
     /// which is how a tap without consent behaves — silence, not an error.
     pub calls: AtomicU64,
     pub frames: AtomicU64,
+    /// Sum of squares and sample count since the last read, for RMS.
+    ///
+    /// Peak tells you whether you are clipping; RMS tells you how loud it
+    /// actually is, and the gap between them is the crest factor — which is how
+    /// you tell a compressed master from a live take at the same peak level.
+    /// Accumulated as bits of an `f64` so the sum survives a long block without
+    /// losing the quiet samples to rounding.
+    sum_sq: AtomicU64,
+    sum_n: AtomicU64,
     /// Latched the first time any sample is non-zero. Never cleared: it is the
     /// evidence that consent was granted, and one sample is enough.
     pub ever_signal: AtomicBool,
@@ -104,6 +113,8 @@ impl Default for MeterState {
             calls: AtomicU64::new(0),
             frames: AtomicU64::new(0),
             ever_signal: AtomicBool::new(false),
+            sum_sq: AtomicU64::new(0),
+            sum_n: AtomicU64::new(0),
             ring: (0..RING_FRAMES).map(|_| AtomicU32::new(0)).collect(),
             written: AtomicU64::new(0),
             overruns: AtomicU64::new(0),
@@ -165,6 +176,8 @@ extern "C" fn peak_io_proc(
         return 0;
     }
     let mut peak = 0.0f32;
+    let mut sum_sq = 0.0f64;
+    let mut sample_count = 0u64;
     unsafe {
         let list = &*input;
         let buffers =
@@ -186,7 +199,9 @@ extern "C" fn peak_io_proc(
                 if a > peak {
                     peak = a;
                 }
+                sum_sq += (*s as f64) * (*s as f64);
             }
+            sample_count += n_samples_of(b);
         }
 
         // A mono mixdown for the spectrum: sum the buffers frame by frame and
@@ -235,7 +250,20 @@ extern "C" fn peak_io_proc(
         state.peak.fetch_max(peak.to_bits(), Ordering::Relaxed);
         state.ever_signal.store(true, Ordering::Relaxed);
     }
+    // Accumulate rather than replace: several callbacks may land between two
+    // reads, and an RMS over the newest block alone would be a different
+    // measurement each time depending on the buffer size.
+    if sample_count > 0 {
+        let prev = f64::from_bits(state.sum_sq.load(Ordering::Relaxed));
+        state.sum_sq.store((prev + sum_sq).to_bits(), Ordering::Relaxed);
+        state.sum_n.fetch_add(sample_count, Ordering::Relaxed);
+    }
     0
+}
+
+/// Samples in one buffer, for the RMS denominator.
+fn n_samples_of(b: &AudioBufferRaw) -> u64 {
+    (b.data_byte_size as usize / size_of::<f32>()) as u64
 }
 
 /// A running peak meter on one device. Dropping it stops and detaches cleanly.
@@ -309,6 +337,21 @@ impl IoProcMeter {
     /// Frames the spectrum reader lost to the writer lapping it.
     pub fn overruns(&self) -> u64 {
         self.state.overruns.load(Ordering::Relaxed)
+    }
+
+    /// RMS since the last call, in dBFS, and the count it was taken over.
+    /// Reading clears, so successive calls do not overlap.
+    pub fn rms_dbfs(&self) -> Option<f32> {
+        let n = self.state.sum_n.swap(0, Ordering::Relaxed);
+        let sum = f64::from_bits(self.state.sum_sq.swap(0, Ordering::Relaxed));
+        if n == 0 {
+            return None;
+        }
+        let rms = (sum / n as f64).sqrt() as f32;
+        if rms <= 0.0 {
+            return Some(crate::meter::CAPTURE_FLOOR_DBFS);
+        }
+        Some((20.0 * rms.log10()).clamp(crate::meter::CAPTURE_FLOOR_DBFS, 0.0))
     }
 
     /// Peak since the last call, in dBFS. `None` until the first block arrives.
@@ -445,6 +488,24 @@ mod tests {
         let start = st.written.load(Ordering::Acquire);
         st.written.store(start + RING_FRAMES as u64 + 1, Ordering::Release);
         assert_eq!(st.overruns.load(Ordering::Relaxed), before, "counted too eagerly");
+    }
+
+    #[test]
+    fn rms_is_the_root_mean_square_and_clears_on_read() {
+        let m = IoProcMeter::detached();
+        // A full-scale sine has an RMS of 1/sqrt(2), which is -3.01 dBFS.
+        let n = 4096usize;
+        let mut sum = 0.0f64;
+        for i in 0..n {
+            let v = (std::f32::consts::TAU * 8.0 * i as f32 / n as f32).sin() as f64;
+            sum += v * v;
+        }
+        m.state.sum_sq.store(sum.to_bits(), Ordering::Relaxed);
+        m.state.sum_n.store(n as u64, Ordering::Relaxed);
+        let db = m.rms_dbfs().expect("a reading");
+        assert!((db + 3.01).abs() < 0.05, "full-scale sine RMS read {db} dBFS");
+        // Reading clears, so there is nothing to double-count.
+        assert_eq!(m.rms_dbfs(), None, "rms did not clear on read");
     }
 
     #[test]

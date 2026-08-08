@@ -83,6 +83,10 @@ pub struct Glyphs {
     pub cursor: &'static str,
     pub rule: &'static str,
     pub corner: &'static str,
+    /// Branch stem for tree views, where `corner` is the last child.
+    pub tee: &'static str,
+    /// The RMS trace drawn over a peak chart.
+    pub rms: char,
     pub arrow: &'static str,
     pub enter: &'static str,
     pub updown: &'static str,
@@ -103,6 +107,8 @@ pub const UNICODE: Glyphs = Glyphs {
     cursor: "\u{2588}",
     rule: "\u{2500}",
     corner: "\u{2514}\u{2500}",
+    tee: "\u{251c}\u{2500}",
+    rms: '\u{2504}',
     arrow: "\u{2192}",
     enter: "\u{21B5}",
     updown: "\u{2191}\u{2193}",
@@ -119,6 +125,8 @@ pub const ASCII: Glyphs = Glyphs {
     cursor: "_",
     rule: "-",
     corner: "\\-",
+    tee: "|-",
+    rms: '-',
     arrow: ">",
     enter: "e",
     updown: "^v",

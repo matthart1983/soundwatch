@@ -222,6 +222,24 @@ fn device(id: u32, name: &str, direction: Direction) -> Device {
         latency_frames: 155,
         is_default: true,
         is_running: true,
+        uid: Some(format!("demo:{id}")),
+        manufacturer: Some("Demo Audio".into()),
+        transport: if name.contains("Scarlett") {
+            crate::model::Transport::Usb
+        } else if name.contains("BlackHole") {
+            crate::model::Transport::Virtual
+        } else if name.contains("AirPods") {
+            crate::model::Transport::Bluetooth
+        } else {
+            crate::model::Transport::BuiltIn
+        },
+        device_latency: 100,
+        stream_latency: 22,
+        safety_offset: 33,
+        buffer_range: Some((14, 4096)),
+        clock_domain: 0,
+        is_alive: true,
+        sub_device_uids: Vec::new(),
     }
 }
 
@@ -246,13 +264,87 @@ pub fn snapshot(xruns: u32) -> Snapshot {
         })
         .collect();
 
+    // Only the two real defaults are marked, and the hardware varies — a
+    // fixture where every device is identical exercises none of the columns.
+    let devices = vec![
+        device(1, "MacBook Speakers", Direction::Output),
+        device(2, "MacBook Mic", Direction::Input),
+        Device {
+            is_default: false,
+            buffer_frames: 64,
+            latency_frames: 96,
+            ..device(3, "Scarlett 2i2 USB", Direction::Output)
+        },
+        Device {
+            is_default: false,
+            buffer_frames: 64,
+            latency_frames: 96,
+            ..device(4, "Scarlett 2i2 USB", Direction::Input)
+        },
+        Device {
+            is_default: false,
+            is_running: false,
+            buffer_frames: 512,
+            latency_frames: 0,
+            ..device(5, "BlackHole 2ch", Direction::Output)
+        },
+        Device {
+            is_default: false,
+            buffer_frames: 1024,
+            latency_frames: 2100,
+            format: Format { rate: 16000, bits: 16, channels: 1 },
+            ..device(6, "AirPods Pro", Direction::Output)
+        },
+    ];
+    let xrun_log = if xruns > 0 {
+        vec![crate::model::XrunEvent {
+            at: Timestamp(now.0.saturating_sub(4_000)),
+            device: "Scarlett 2i2 USB".into(),
+            count: xruns,
+        }]
+    } else {
+        Vec::new()
+    };
+    let events = vec![
+        crate::model::SessionEvent {
+            at: Timestamp(now.0.saturating_sub(2_538_000)),
+            kind: crate::model::EventKind::Started,
+            what: "6 devices".into(),
+        },
+        crate::model::SessionEvent {
+            at: Timestamp(now.0.saturating_sub(120_000)),
+            kind: crate::model::EventKind::DeviceAdded,
+            what: "AirPods Pro (bluetooth)".into(),
+        },
+        crate::model::SessionEvent {
+            at: Timestamp(now.0.saturating_sub(90_000)),
+            kind: crate::model::EventKind::DefaultChanged,
+            what: "output \u{2192} AirPods Pro".into(),
+        },
+        crate::model::SessionEvent {
+            at: Timestamp(now.0.saturating_sub(60_000)),
+            kind: crate::model::EventKind::FormatChanged,
+            what: "AirPods Pro: 48k/24 \u{2192} 16k/16".into(),
+        },
+        // And the user moving it back, which is what actually happens once you
+        // hear what the headset did to the audio.
+        crate::model::SessionEvent {
+            at: Timestamp(now.0.saturating_sub(30_000)),
+            kind: crate::model::EventKind::DefaultChanged,
+            what: "output \u{2192} MacBook Speakers".into(),
+        },
+    ];
+
     Snapshot {
         backend: "demo",
         host: "jules-mbp".into(),
         default_out: Some(device(1, "MacBook Speakers", Direction::Output)),
         default_in: Some(device(2, "MacBook Mic", Direction::Input)),
+        devices,
         streams,
         xruns_60s: xruns,
+        xrun_log,
+        events,
         caps: Caps {
             device_levels: true,
             input_levels: true,

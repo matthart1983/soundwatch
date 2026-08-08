@@ -20,11 +20,14 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use super::ffi::{self, AudioObjectID, AudioObjectPropertyAddress, AudioStreamBasicDescription};
 use super::{Audio, AudioBackend, Levels, Metering, Pending};
-use crate::model::{Caps, Device, Direction, Format, Snapshot, Stream, Timestamp};
+use crate::model::{
+    Caps, Device, Direction, EventKind, Format, SessionEvent, Snapshot, Stream, Timestamp,
+    Transport, XrunEvent,
+};
 
 /// Incremented from the HAL's `kAudioDeviceProcessorOverload` callback, which
 /// runs on a CoreAudio-owned thread. An atomic keeps the callback allocation-
@@ -42,14 +45,38 @@ static XRUNS: AtomicU64 = AtomicU64::new(0);
 /// Tracking it where it actually lives is the honest version.
 static LISTENING: Mutex<BTreeSet<AudioObjectID>> = Mutex::new(BTreeSet::new());
 
+/// Which device most recently overloaded. A bare count says the machine
+/// dropped audio; the id says *which interface* to go and look at, which is the
+/// only version of that fact you can act on.
+static LAST_OVERLOAD: AtomicU32 = AtomicU32::new(0);
+
 extern "C" fn overload_listener(
-    _id: AudioObjectID,
+    id: AudioObjectID,
     _n: u32,
     _addrs: *const AudioObjectPropertyAddress,
     _data: *mut std::ffi::c_void,
 ) -> i32 {
     XRUNS.fetch_add(1, Ordering::Relaxed);
+    LAST_OVERLOAD.store(id, Ordering::Relaxed);
     0
+}
+
+fn transport_of(id: AudioObjectID) -> Transport {
+    match ffi::get::<u32>(id, &ffi::addr(ffi::DEV_TRANSPORT_TYPE, ffi::SCOPE_GLOBAL)) {
+        Some(ffi::TRANSPORT_BUILTIN) => Transport::BuiltIn,
+        Some(ffi::TRANSPORT_USB) => Transport::Usb,
+        Some(ffi::TRANSPORT_BLUETOOTH) | Some(ffi::TRANSPORT_BLUETOOTH_LE) => Transport::Bluetooth,
+        Some(ffi::TRANSPORT_HDMI) => Transport::Hdmi,
+        Some(ffi::TRANSPORT_DISPLAYPORT) => Transport::DisplayPort,
+        Some(ffi::TRANSPORT_AIRPLAY) => Transport::AirPlay,
+        Some(ffi::TRANSPORT_VIRTUAL) => Transport::Virtual,
+        Some(ffi::TRANSPORT_AGGREGATE) => Transport::Aggregate,
+        Some(ffi::TRANSPORT_THUNDERBOLT) => Transport::Thunderbolt,
+        Some(ffi::TRANSPORT_FIREWIRE) => Transport::FireWire,
+        Some(ffi::TRANSPORT_PCI) => Transport::Pci,
+        Some(ffi::TRANSPORT_CONTINUITY) => Transport::Continuity,
+        _ => Transport::Unknown,
+    }
 }
 
 /// `(register these, forget these)` given what exists and what we already hold.
@@ -98,6 +125,9 @@ pub struct CoreAudio {
     tap: Pending<super::tap::LevelTap>,
     /// Input metering, same four states.
     input: Pending<super::input::InputMeter>,
+    /// Device names from the last tick, so an overload callback that only
+    /// carries an id can still be reported by name.
+    last_names: HashMap<AudioObjectID, String>,
     /// Which device the last input-meter attempt was for. Stops a device that
     /// genuinely cannot be opened from being retried every single tick.
     last_input_attempt: Option<AudioObjectID>,
@@ -112,6 +142,17 @@ pub struct CoreAudio {
     /// Samples the spectrum wants per window. Configurable, so it cannot be
     /// read off a constant.
     window_len: usize,
+    /// Recent dropouts, and what has changed this session. Both are bounded:
+    /// this is a session log, not a database, and a tool that grows without
+    /// limit while you leave it open is a tool you stop leaving open.
+    xrun_log: VecDeque<XrunEvent>,
+    events: VecDeque<SessionEvent>,
+    /// Previous tick's world, for diffing into events.
+    prev_devices: Vec<(String, Format, bool)>,
+    prev_default_out: Option<String>,
+    prev_default_in: Option<String>,
+    prev_streams: HashSet<String>,
+    started: bool,
 }
 
 /// How long a tap may read pure silence before that becomes suspicious. Long
@@ -124,6 +165,11 @@ const DEAF_AFTER_SECS: u64 = 8;
 /// absorb a slow frame and short enough that a pause, a sleep or a stopped
 /// process can never masquerade as a burst of dropouts.
 const XRUN_GAP_SECS: u64 = 5;
+
+/// Bounds on the session logs. Enough to scroll back through a working
+/// session, not enough to be a memory leak with a nice name.
+const XRUN_LOG_MAX: usize = 256;
+const EVENT_LOG_MAX: usize = 512;
 
 impl Default for CoreAudio {
     fn default() -> Self {
@@ -158,11 +204,19 @@ impl CoreAudio {
             metering,
             tap,
             input,
+            last_names: HashMap::new(),
             last_input_attempt: None,
             output_is_busy: false,
             last_out: None,
             last_in: None,
             window_len: crate::dsp::FFT_SIZE,
+            xrun_log: VecDeque::new(),
+            events: VecDeque::new(),
+            prev_devices: Vec::new(),
+            prev_default_out: None,
+            prev_default_in: None,
+            prev_streams: HashSet::new(),
+            started: false,
         }
     }
 
@@ -214,6 +268,12 @@ impl CoreAudio {
         let device_latency = ffi::get::<u32>(id, &ffi::addr(ffi::DEV_LATENCY, scope)).unwrap_or(0);
         let safety = ffi::get::<u32>(id, &ffi::addr(ffi::DEV_SAFETY_OFFSET, scope)).unwrap_or(0);
 
+        let buffer_range = ffi::get::<ffi::AudioValueRange>(
+            id,
+            &ffi::addr(ffi::DEV_BUFFER_RANGE, ffi::SCOPE_GLOBAL),
+        )
+        .map(|r| (r.mMinimum.max(0.0) as u32, r.mMaximum.max(0.0) as u32));
+
         Some(Device {
             id,
             name: Self::device_name(id),
@@ -232,6 +292,22 @@ impl CoreAudio {
             )
             .unwrap_or(0)
                 != 0,
+            uid: ffi::get_string(id, &ffi::addr(ffi::DEV_UID, ffi::SCOPE_GLOBAL)),
+            manufacturer: ffi::get_string(id, &ffi::addr(ffi::DEV_MANUFACTURER, ffi::SCOPE_GLOBAL)),
+            transport: transport_of(id),
+            device_latency,
+            stream_latency,
+            safety_offset: safety,
+            buffer_range,
+            clock_domain: ffi::get::<u32>(id, &ffi::addr(ffi::DEV_CLOCK_DOMAIN, ffi::SCOPE_GLOBAL))
+                .unwrap_or(0),
+            is_alive: ffi::get::<u32>(id, &ffi::addr(ffi::DEV_IS_ALIVE, ffi::SCOPE_GLOBAL))
+                .unwrap_or(1)
+                != 0,
+            sub_device_uids: ffi::get_string_array(
+                id,
+                &ffi::addr(ffi::AGG_FULL_SUB_DEVICE_LIST, ffi::SCOPE_GLOBAL),
+            ),
         })
     }
 
@@ -262,6 +338,108 @@ impl CoreAudio {
             ffi::remove_listener(id, &a, overload_listener, std::ptr::null_mut());
             registered.remove(&id);
         }
+    }
+
+    /// Record an event, keeping the log bounded.
+    fn log(&mut self, at: Timestamp, kind: EventKind, what: String) {
+        if self.events.len() >= EVENT_LOG_MAX {
+            self.events.pop_front();
+        }
+        self.events.push_back(SessionEvent { at, kind, what });
+    }
+
+    /// Diff this tick against the last and record what changed.
+    ///
+    /// The Timeline tab exists because the hard audio bugs are the ones where
+    /// something changed and you did not see it: a device woke up and stole the
+    /// default, a format shifted under a running stream, an interface dropped
+    /// off the bus for a second. A snapshot cannot show any of that; only the
+    /// difference between two of them can.
+    fn record_changes(
+        &mut self,
+        now: Timestamp,
+        devices: &[Device],
+        default_out: Option<&Device>,
+        default_in: Option<&Device>,
+        streams: &[Stream],
+    ) {
+        if !self.started {
+            self.started = true;
+            self.log(now, EventKind::Started, format!("{} devices", devices.len()));
+        } else {
+            // Collected before logging: `log` takes &mut self and the diff
+            // borrows the previous state immutably.
+            let prev: HashMap<String, Format> =
+                self.prev_devices.iter().map(|(n, f, _)| (n.clone(), *f)).collect();
+            let mut changes: Vec<(EventKind, String)> = Vec::new();
+            for d in devices {
+                match prev.get(&d.name) {
+                    None => changes.push((
+                        EventKind::DeviceAdded,
+                        format!("{} ({})", d.name, d.transport.name()),
+                    )),
+                    Some(f) if *f != d.format => changes.push((
+                        EventKind::FormatChanged,
+                        format!(
+                            "{}: {} \u{2192} {}",
+                            d.name,
+                            crate::fmt::rate_bits(f.rate, f.bits),
+                            crate::fmt::rate_bits(d.format.rate, d.format.bits)
+                        ),
+                    )),
+                    _ => {}
+                }
+            }
+            for (kind, what) in changes {
+                self.log(now, kind, what);
+            }
+            let live: HashSet<&str> = devices.iter().map(|d| d.name.as_str()).collect();
+            let gone: Vec<String> = self
+                .prev_devices
+                .iter()
+                .map(|(n, _, _)| n.clone())
+                .filter(|n| !live.contains(n.as_str()))
+                .collect();
+            for n in gone {
+                self.log(now, EventKind::DeviceRemoved, n);
+            }
+
+            let default_changes: Vec<String> = [
+                ("output", self.prev_default_out.clone(), default_out.map(|d| d.name.clone())),
+                ("input", self.prev_default_in.clone(), default_in.map(|d| d.name.clone())),
+            ]
+            .into_iter()
+            .filter(|(_, was, now_name)| was.as_deref() != now_name.as_deref())
+            .map(|(label, _, now_name)| {
+                format!("{label} \u{2192} {}", now_name.unwrap_or_else(|| "none".into()))
+            })
+            .collect();
+            for what in default_changes {
+                self.log(now, EventKind::DefaultChanged, what);
+            }
+
+            let live_streams: HashSet<String> = streams.iter().map(|s| s.key.clone()).collect();
+            let opened: Vec<String> = streams
+                .iter()
+                .filter(|s| !self.prev_streams.contains(&s.key))
+                .map(|s| format!("{} on {}", s.app, s.device))
+                .collect();
+            for what in opened {
+                self.log(now, EventKind::StreamOpened, what);
+            }
+            let closed: Vec<String> =
+                self.prev_streams.difference(&live_streams).cloned().collect();
+            for key in closed {
+                // The key is pid:direction:device; the app name is gone with it.
+                self.log(now, EventKind::StreamClosed, key);
+            }
+            self.prev_streams = live_streams;
+        }
+
+        self.prev_devices =
+            devices.iter().map(|d| (d.name.clone(), d.format, d.is_alive)).collect();
+        self.prev_default_out = default_out.map(|d| d.name.clone());
+        self.prev_default_in = default_in.map(|d| d.name.clone());
     }
 
     /// Follow the default input device when the user changes it.
@@ -328,6 +506,27 @@ impl CoreAudio {
         };
         if delta > 0 && attributable {
             self.xrun_window.push_back((now, delta as u32));
+            let id = LAST_OVERLOAD.load(Ordering::Relaxed);
+            let device =
+                self.last_names.get(&id).cloned().unwrap_or_else(|| {
+                    if id == 0 { "unknown".into() } else { format!("device {id}") }
+                });
+            if self.xrun_log.len() >= XRUN_LOG_MAX {
+                self.xrun_log.pop_front();
+            }
+            self.xrun_log.push_back(XrunEvent {
+                at: now,
+                device: device.clone(),
+                count: delta as u32,
+            });
+            if self.events.len() >= EVENT_LOG_MAX {
+                self.events.pop_front();
+            }
+            self.events.push_back(SessionEvent {
+                at: now,
+                kind: EventKind::Xrun,
+                what: format!("{delta} on {device}"),
+            });
         }
 
         while let Some(&(at, _)) = self.xrun_window.front() {
@@ -585,6 +784,25 @@ impl AudioBackend for CoreAudio {
 
         let names: HashMap<AudioObjectID, String> =
             Self::all_devices().into_iter().map(|id| (id, Self::device_name(id))).collect();
+        self.last_names = names.clone();
+
+        // Every device, both directions. A device with channels in both shows
+        // up twice — which is the truth: they are two independent paths with
+        // their own formats, buffers and latencies.
+        let mut devices: Vec<Device> = Vec::new();
+        for id in Self::all_devices() {
+            for dir in [Direction::Output, Direction::Input] {
+                if let Some(d) = Self::read_device(id, dir, false) {
+                    devices.push(d);
+                }
+            }
+        }
+        devices.sort_by(|a, b| {
+            a.name
+                .to_lowercase()
+                .cmp(&b.name.to_lowercase())
+                .then(b.direction.is_input().cmp(&a.direction.is_input()))
+        });
 
         let default_out = Self::default_device(true)
             .and_then(|id| Self::read_device(id, Direction::Output, true));
@@ -603,13 +821,26 @@ impl AudioBackend for CoreAudio {
             d.is_running && streams.iter().any(|s| !s.direction.is_input() && s.device_id == d.id)
         });
 
+        // Mark the defaults inside the full list, so the Devices tab can show
+        // them without a second lookup.
+        for d in &mut devices {
+            let is_out = !d.direction.is_input();
+            let def = if is_out { default_out.as_ref() } else { default_in.as_ref() };
+            d.is_default = def.is_some_and(|x| x.id == d.id);
+        }
+
+        self.record_changes(now, &devices, default_out.as_ref(), default_in.as_ref(), &streams);
+
         Snapshot {
             backend: self.name(),
             host: self.host.clone(),
             default_out,
             default_in,
+            devices,
             streams,
             xruns_60s,
+            xrun_log: self.xrun_log.iter().cloned().collect(),
+            events: self.events.iter().cloned().collect(),
             caps: self.caps(),
             at: now,
         }
@@ -657,6 +888,8 @@ impl AudioBackend for CoreAudio {
         Levels {
             out_dbfs: self.tap.live().and_then(|t| t.peak_dbfs()),
             in_dbfs: self.input.live().and_then(|m| m.peak_dbfs()),
+            out_rms_dbfs: self.tap.live().and_then(|t| t.rms_dbfs()),
+            in_rms_dbfs: self.input.live().and_then(|m| m.rms_dbfs()),
         }
     }
 }

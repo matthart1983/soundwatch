@@ -52,6 +52,8 @@ pub struct Config {
     pub meter_input: bool,
     /// Display refresh, in frames per second.
     pub refresh_hz: u64,
+    /// The one-screen Lite chrome instead of the tabbed full product.
+    pub lite: bool,
 }
 
 impl Default for Config {
@@ -72,6 +74,7 @@ impl Default for Config {
             xrun_alert: crate::model::XRUN_ALERT_THRESHOLD,
             meter_input: false,
             refresh_hz: crate::app::SAMPLE_HZ,
+            lite: false,
         }
     }
 }
@@ -108,6 +111,7 @@ impl Config {
                     }
                 }
                 "ascii" => c.ascii = value == "true",
+                "lite" => c.lite = value == "true",
                 "meter_input" => c.meter_input = value == "true",
                 "meter_floor" => set_f32(&mut c.meter_floor, value, -120.0, -20.0),
                 "spectrum_floor" => set_f32(&mut c.spectrum_floor, value, -140.0, -40.0),
@@ -146,6 +150,7 @@ impl Config {
         s.push_str("# Delete this file to go back to the defaults.\n\n");
         let _ = writeln!(s, "theme = \"{}\"", self.theme.name());
         let _ = writeln!(s, "ascii = {}", self.ascii);
+        let _ = writeln!(s, "lite = {}", self.lite);
         let _ = writeln!(s, "meter_input = {}", self.meter_input);
         let _ = writeln!(s, "meter_floor = {}", self.meter_floor);
         let _ = writeln!(s, "spectrum_floor = {}", self.spectrum_floor);
@@ -210,6 +215,7 @@ fn set_f32(slot: &mut f32, value: &str, lo: f32, hi: f32) {
 pub enum Setting {
     Theme,
     Ascii,
+    Lite,
     MeterFloor,
     XrunAlert,
     RefreshHz,
@@ -221,9 +227,10 @@ pub enum Setting {
 }
 
 impl Setting {
-    pub const ALL: [Setting; 10] = [
+    pub const ALL: [Setting; 11] = [
         Setting::Theme,
         Setting::Ascii,
+        Setting::Lite,
         Setting::MeterFloor,
         Setting::XrunAlert,
         Setting::RefreshHz,
@@ -248,6 +255,7 @@ impl Setting {
         match self {
             Setting::Theme => "theme",
             Setting::Ascii => "glyphs",
+            Setting::Lite => "screen",
             Setting::MeterFloor => "meter floor",
             Setting::XrunAlert => "xrun alert",
             Setting::RefreshHz => "refresh",
@@ -264,6 +272,7 @@ impl Setting {
         match self {
             Setting::Theme => "btop shades bars by height; spec colours them by meaning",
             Setting::Ascii => "ascii is safe on terminals with thin glyph coverage",
+            Setting::Lite => "lite is the handoff's one screen; full is the ten tabs",
             Setting::MeterFloor => "lower shows the noise floor, and flattens music",
             Setting::XrunAlert => "xruns in 60s before the header goes red",
             Setting::RefreshHz => "higher is smoother and busier; the audio is unaffected",
@@ -279,6 +288,7 @@ impl Setting {
         match self {
             Setting::Theme => c.theme.name().into(),
             Setting::Ascii => if c.ascii { "ascii" } else { "unicode" }.into(),
+            Setting::Lite => if c.lite { "lite" } else { "full" }.into(),
             Setting::MeterFloor => format!("{:.0} dBFS", c.meter_floor),
             Setting::XrunAlert => format!("{}", c.xrun_alert),
             Setting::RefreshHz => format!("{} fps", c.refresh_hz),
@@ -303,6 +313,7 @@ impl Setting {
                 c.theme = if c.theme == Theme::Spec { Theme::Btop } else { Theme::Spec }
             }
             Setting::Ascii => c.ascii = !c.ascii,
+            Setting::Lite => c.lite = !c.lite,
             Setting::MeterInput => c.meter_input = !c.meter_input,
             Setting::MeterFloor => {
                 c.meter_floor = step_list(&[-40.0, -60.0, -72.0, -90.0], c.meter_floor, delta)
@@ -382,6 +393,7 @@ mod tests {
         let c = Config {
             theme: Theme::Btop,
             ascii: true,
+            lite: true,
             meter_floor: -90.0,
             fft_size: 8192,
             peak_hold: 0.0,

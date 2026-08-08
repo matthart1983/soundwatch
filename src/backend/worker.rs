@@ -190,7 +190,7 @@ mod tests {
             crate::demo::snapshot(0)
         }
         fn levels(&mut self) -> Levels {
-            Levels { out_dbfs: Some(-12.0), in_dbfs: None }
+            Levels { out_dbfs: Some(-12.0), ..Default::default() }
         }
     }
 

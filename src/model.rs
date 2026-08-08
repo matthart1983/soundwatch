@@ -43,6 +43,53 @@ pub struct Format {
     pub channels: u8,
 }
 
+/// How a device is attached. Bluetooth is the one that matters most: it is the
+/// usual answer to "why does this sound like that", and no other column on any
+/// screen would tell you.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Transport {
+    #[default]
+    Unknown,
+    BuiltIn,
+    Usb,
+    Bluetooth,
+    Hdmi,
+    DisplayPort,
+    AirPlay,
+    Virtual,
+    Aggregate,
+    Thunderbolt,
+    FireWire,
+    Pci,
+    Continuity,
+}
+
+impl Transport {
+    pub fn name(self) -> &'static str {
+        match self {
+            Transport::Unknown => "--",
+            Transport::BuiltIn => "built-in",
+            Transport::Usb => "usb",
+            Transport::Bluetooth => "bluetooth",
+            Transport::Hdmi => "hdmi",
+            Transport::DisplayPort => "displayport",
+            Transport::AirPlay => "airplay",
+            Transport::Virtual => "virtual",
+            Transport::Aggregate => "aggregate",
+            Transport::Thunderbolt => "thunderbolt",
+            Transport::FireWire => "firewire",
+            Transport::Pci => "pci",
+            Transport::Continuity => "continuity",
+        }
+    }
+
+    /// Transports that resample, compress, or otherwise change the signal on
+    /// the way out, and are worth pointing at when something sounds wrong.
+    pub fn is_lossy_path(self) -> bool {
+        matches!(self, Transport::Bluetooth | Transport::AirPlay | Transport::Continuity)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Device {
     pub id: u32,
@@ -55,9 +102,25 @@ pub struct Device {
     pub buffer_frames: u32,
     /// Device latency + stream latency + safety offset, in frames.
     pub latency_frames: u32,
-    #[allow(dead_code)]
     pub is_default: bool,
     pub is_running: bool,
+    /// Stable identifier, which survives the device id changing across replug.
+    pub uid: Option<String>,
+    pub manufacturer: Option<String>,
+    pub transport: Transport,
+    /// The three components of `latency_frames`, kept apart because the
+    /// Latency tab's whole job is showing where the milliseconds went.
+    pub device_latency: u32,
+    pub stream_latency: u32,
+    pub safety_offset: u32,
+    /// Buffer sizes the device will accept, when it reports a range.
+    pub buffer_range: Option<(u32, u32)>,
+    /// Devices sharing a clock domain are sample-synchronous; ones that do not
+    /// need drift compensation when combined.
+    pub clock_domain: u32,
+    pub is_alive: bool,
+    /// For aggregates: the UIDs it is built from.
+    pub sub_device_uids: Vec<String>,
 }
 
 impl Device {
@@ -115,6 +178,54 @@ pub struct Caps {
     pub note: Option<String>,
 }
 
+/// One dropout, with enough context to act on it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct XrunEvent {
+    pub at: Timestamp,
+    pub device: String,
+    pub count: u32,
+}
+
+/// Something that changed, for the Timeline tab.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SessionEvent {
+    pub at: Timestamp,
+    pub kind: EventKind,
+    pub what: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EventKind {
+    Started,
+    DeviceAdded,
+    DeviceRemoved,
+    DefaultChanged,
+    FormatChanged,
+    StreamOpened,
+    StreamClosed,
+    Xrun,
+}
+
+impl EventKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            EventKind::Started => "start",
+            EventKind::DeviceAdded => "device+",
+            EventKind::DeviceRemoved => "device-",
+            EventKind::DefaultChanged => "default",
+            EventKind::FormatChanged => "format",
+            EventKind::StreamOpened => "stream+",
+            EventKind::StreamClosed => "stream-",
+            EventKind::Xrun => "xrun",
+        }
+    }
+
+    /// Only dropouts are a fault; the rest are just things that happened.
+    pub fn is_fault(self) -> bool {
+        self == EventKind::Xrun
+    }
+}
+
 /// The state of the world for one repaint.
 #[derive(Clone, Debug)]
 pub struct Snapshot {
@@ -122,8 +233,14 @@ pub struct Snapshot {
     pub host: String,
     pub default_out: Option<Device>,
     pub default_in: Option<Device>,
+    /// Every device on the machine, both directions, in name order.
+    pub devices: Vec<Device>,
     pub streams: Vec<Stream>,
     pub xruns_60s: u32,
+    /// Recent dropouts, newest last.
+    pub xrun_log: Vec<XrunEvent>,
+    /// What has changed this session, newest last.
+    pub events: Vec<SessionEvent>,
     pub caps: Caps,
     pub at: Timestamp,
 }
@@ -140,8 +257,11 @@ impl Snapshot {
             host,
             default_out: None,
             default_in: None,
+            devices: Vec::new(),
             streams: Vec::new(),
             xruns_60s: 0,
+            xrun_log: Vec::new(),
+            events: Vec::new(),
             caps: Caps {
                 note: Some("reading the audio system\u{2026}".into()),
                 ..Default::default()
@@ -249,6 +369,16 @@ mod tests {
             latency_frames: 0,
             is_default: true,
             is_running: running,
+            uid: None,
+            manufacturer: None,
+            transport: Transport::BuiltIn,
+            device_latency: 0,
+            stream_latency: 0,
+            safety_offset: 0,
+            buffer_range: None,
+            clock_domain: 0,
+            is_alive: true,
+            sub_device_uids: Vec::new(),
         }
     }
 
@@ -258,8 +388,11 @@ mod tests {
             host: "test".into(),
             default_out: out,
             default_in: inp,
+            devices: Vec::new(),
             streams: Vec::new(),
             xruns_60s: xruns,
+            xrun_log: Vec::new(),
+            events: Vec::new(),
             caps: Caps { xruns: true, ..Default::default() },
             at: Timestamp(0),
         }

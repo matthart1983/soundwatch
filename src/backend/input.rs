@@ -81,6 +81,11 @@ impl InputMeter {
         self.meter.overruns()
     }
 
+    /// RMS since the last call, in dBFS.
+    pub fn rms_dbfs(&self) -> Option<f32> {
+        self.meter.rms_dbfs()
+    }
+
     /// The most recent `n` samples of the mono mixdown, for the spectrum.
     pub fn recent(&self, n: usize) -> Option<Vec<f32>> {
         self.meter.recent(n)

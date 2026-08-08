@@ -74,6 +74,37 @@ pub const DEV_IS_RUNNING: u32 = fourcc(b"goin");
 pub const DEV_IS_RUNNING_SOMEWHERE: u32 = fourcc(b"gone");
 pub const DEV_STREAMS: u32 = fourcc(b"stm#");
 pub const DEV_PROCESSOR_OVERLOAD: u32 = fourcc(b"over");
+pub const DEV_TRANSPORT_TYPE: u32 = fourcc(b"tran");
+pub const DEV_CLOCK_DOMAIN: u32 = fourcc(b"clkd");
+pub const DEV_IS_ALIVE: u32 = fourcc(b"livn");
+pub const DEV_BUFFER_RANGE: u32 = fourcc(b"fsz#");
+pub const DEV_MANUFACTURER: u32 = fourcc(b"lmak");
+/// Aggregate devices (macOS): the devices and taps they are built from.
+pub const AGG_FULL_SUB_DEVICE_LIST: u32 = fourcc(b"grup");
+pub const AGG_TAP_LIST: u32 = fourcc(b"tap#");
+pub const AGG_COMPOSITION: u32 = fourcc(b"acom");
+
+// Transport types, as the headers spell them.
+pub const TRANSPORT_BUILTIN: u32 = fourcc(b"bltn");
+pub const TRANSPORT_USB: u32 = fourcc(b"usb ");
+pub const TRANSPORT_BLUETOOTH: u32 = fourcc(b"blue");
+pub const TRANSPORT_BLUETOOTH_LE: u32 = fourcc(b"blea");
+pub const TRANSPORT_HDMI: u32 = fourcc(b"hdmi");
+pub const TRANSPORT_DISPLAYPORT: u32 = fourcc(b"dprt");
+pub const TRANSPORT_AIRPLAY: u32 = fourcc(b"airp");
+pub const TRANSPORT_VIRTUAL: u32 = fourcc(b"virt");
+pub const TRANSPORT_AGGREGATE: u32 = fourcc(b"grup");
+pub const TRANSPORT_THUNDERBOLT: u32 = fourcc(b"thun");
+pub const TRANSPORT_FIREWIRE: u32 = fourcc(b"1394");
+pub const TRANSPORT_PCI: u32 = fourcc(b"pci ");
+pub const TRANSPORT_CONTINUITY: u32 = fourcc(b"ccam");
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct AudioValueRange {
+    pub mMinimum: f64,
+    pub mMaximum: f64,
+}
 
 // Stream
 pub const STREAM_PHYSICAL_FORMAT: u32 = fourcc(b"pft ");
@@ -143,6 +174,8 @@ unsafe extern "C" {
         encoding: u32,
     ) -> u8;
     fn CFStringGetLength(theString: CFStringRef) -> isize;
+    fn CFArrayGetCount(array: *const c_void) -> isize;
+    fn CFArrayGetValueAtIndex(array: *const c_void, index: isize) -> *const c_void;
     fn CFRelease(cf: *const c_void);
 }
 
@@ -301,6 +334,26 @@ pub fn channel_count(id: AudioObjectID, scope: u32) -> u32 {
             bytes.get(off..off + 4).map(|b| u32::from_ne_bytes([b[0], b[1], b[2], b[3]]))
         })
         .sum()
+}
+
+/// A `CFStringRef` array property, such as an aggregate's sub-device UIDs.
+pub fn get_string_array(id: AudioObjectID, a: &AudioObjectPropertyAddress) -> Vec<String> {
+    // The HAL hands back a CFArray, not a C array, so this reads the CFArray
+    // rather than reinterpreting bytes.
+    let Some(arr) = get::<*const c_void>(id, a).filter(|p| !p.is_null()) else {
+        return Vec::new();
+    };
+    unsafe {
+        let n = CFArrayGetCount(arr);
+        let out = (0..n)
+            .filter_map(|i| {
+                let v = CFArrayGetValueAtIndex(arr, i);
+                if v.is_null() { None } else { cfstring(v) }
+            })
+            .collect();
+        CFRelease(arr);
+        out
+    }
 }
 
 /// Best-effort process name for a pid.

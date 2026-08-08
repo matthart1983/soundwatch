@@ -30,6 +30,21 @@
 
 use crate::grid::{Field, MIN_COLS, MIN_ROWS, content};
 
+/// Which chrome the screen is wearing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Chrome {
+    /// The full product: header, tab bar, body, footer rule, footer.
+    #[default]
+    Tabs,
+    /// SoundWatch Lite: one screen, no tab bar, the handoff's row numbers
+    /// exactly. Kept because the Lite spec is a real spec with real tests, and
+    /// growing a tab bar is not a licence to renumber it.
+    Lite,
+}
+
+/// Rows the tab chrome takes off the top: the bar and its rule.
+pub const TAB_ROWS: u16 = 2;
+
 /// Rows the detail block occupies when it is open.
 pub const DETAIL_ROWS: u16 = 3;
 
@@ -38,7 +53,17 @@ pub const DETAIL_ROWS: u16 = 3;
 pub struct Layout {
     pub w: u16,
     pub h: u16,
+    pub chrome: Chrome,
     pub content: Field,
+
+    /// Tab bar and the rule under it. Only drawn under [`Chrome::Tabs`].
+    pub row_tab_bar: u16,
+    pub row_tab_rule: u16,
+    /// First row and height of the region a tab may draw in.
+    pub body_top: u16,
+    pub body_rows: u16,
+    /// The rule above the footer. Only drawn under [`Chrome::Tabs`].
+    pub row_footer_rule: u16,
 
     pub row_header: u16,
     pub row_out_label: u16,
@@ -69,19 +94,39 @@ pub struct Layout {
 }
 
 impl Layout {
-    pub fn new(w: u16, h: u16) -> Self {
+    /// The Lite chrome, at the handoff's exact numbers.
+    pub fn lite(w: u16, h: u16) -> Self {
+        Self::new(w, h, Chrome::Lite)
+    }
+
+    pub fn new(w: u16, h: u16, chrome: Chrome) -> Self {
         let w = w.max(MIN_COLS);
         let h = h.max(MIN_ROWS);
 
+        // ── chrome ──────────────────────────────────────────────────────────
+        let tabs = chrome == Chrome::Tabs;
+        let row_tab_bar = 1;
+        let row_tab_rule = 2;
+        let body_top = if tabs { row_tab_rule + 1 } else { 0 };
+        let row_footer = h - 1;
+        let row_footer_rule = row_footer.saturating_sub(1);
+        // The body ends above the footer rule under Tabs, and above the prompt
+        // row under Lite.
+        let body_bottom = if tabs { row_footer_rule.saturating_sub(1) } else { row_footer - 1 };
+        let body_rows = (body_bottom + 1).saturating_sub(body_top);
+
         // ── height ──────────────────────────────────────────────────────────
-        let extra = h - MIN_ROWS;
+        // The Lite rows are laid out inside the body, so they are the spec's
+        // verbatim when the body starts at row 0 and shift wholesale when a tab
+        // bar is above them.
+        let extra = body_rows.saturating_sub(MIN_ROWS - if tabs { TAB_ROWS + 1 } else { 0 });
         // A third of the surplus to the meters, split 3:2 as the spec has them.
         let meter_extra = extra / 3;
         let out_extra = meter_extra * 3 / 5;
         let out_meter_h = 3 + out_extra;
         let in_meter_h = 2 + (meter_extra - out_extra);
 
-        let row_out_label = 2;
+        let row_out_label = body_top + 2;
         let row_out_meter = row_out_label + 1;
         let row_in_label = row_out_meter + out_meter_h;
         let row_in_meter = row_in_label + 1;
@@ -91,8 +136,7 @@ impl Layout {
         let row_table_head = row_note + 1;
         let row_table_rule = row_table_head + 1;
         let row_list = row_table_rule + 1;
-        let row_footer = h - 1;
-        let row_prompt = row_footer - 1;
+        let row_prompt = if tabs { row_footer_rule.saturating_sub(1) } else { row_footer - 1 };
         // Whatever is left between the rule and the prompt.
         let list_rows = row_prompt.saturating_sub(row_list);
 
@@ -124,7 +168,13 @@ impl Layout {
         Self {
             w,
             h,
+            chrome,
             content,
+            row_tab_bar,
+            row_tab_rule,
+            body_top,
+            body_rows,
+            row_footer_rule,
             row_header: 0,
             row_out_label,
             row_out_meter,
@@ -195,7 +245,7 @@ mod tests {
     /// fails, the layout is a different design wearing the same name.
     #[test]
     fn eighty_by_twentyfour_is_the_spec_verbatim() {
-        let l = Layout::new(80, 24);
+        let l = Layout::lite(80, 24);
         assert_eq!(l.content, Field::new(1, 78));
 
         assert_eq!(l.row_header, 0);
@@ -221,7 +271,7 @@ mod tests {
     /// `1 / 17 / 40 / 51 / 62 / 70`, identical across all four Lites.
     #[test]
     fn the_family_column_numbers_survive() {
-        let l = Layout::new(80, 24);
+        let l = Layout::lite(80, 24);
         assert_eq!((l.f_app.x0, l.f_app.width()), (1, 15));
         assert_eq!((l.f_device.x0, l.f_device.width()), (17, 22));
         assert_eq!((l.f_device_in.x0, l.f_device_in.width()), (19, 20));
@@ -233,7 +283,7 @@ mod tests {
 
     #[test]
     fn a_smaller_terminal_clamps_to_the_minimum() {
-        assert_eq!(Layout::new(40, 10), Layout::new(80, 24));
+        assert_eq!(Layout::lite(40, 10), Layout::lite(80, 24));
     }
 
     /// Nothing may overlap, overflow the content field, or leave a gap other
@@ -241,7 +291,7 @@ mod tests {
     #[test]
     fn table_fields_tile_the_row_at_every_width() {
         for w in [80u16, 81, 82, 83, 100, 120, 137, 200, 400] {
-            let l = Layout::new(w, 24);
+            let l = Layout::lite(w, 24);
             let fields = [l.f_app, l.f_device, l.f_level, l.f_rate, l.f_lat, l.f_spark];
             for pair in fields.windows(2) {
                 assert_eq!(
@@ -261,7 +311,7 @@ mod tests {
     #[test]
     fn rows_are_ordered_and_inside_the_screen_at_every_height() {
         for h in [24u16, 25, 26, 27, 30, 40, 60, 100] {
-            let l = Layout::new(80, h);
+            let l = Layout::lite(80, h);
             let rows = [
                 l.row_header,
                 l.row_out_label,
@@ -292,8 +342,8 @@ mod tests {
     /// Surplus height reaches the meters and the list, and neither starves.
     #[test]
     fn extra_height_is_shared_between_the_meters_and_the_list() {
-        let small = Layout::new(80, 24);
-        let big = Layout::new(80, 60);
+        let small = Layout::lite(80, 24);
+        let big = Layout::lite(80, 60);
         assert!(big.out_meter_h > small.out_meter_h, "meters did not grow");
         assert!(big.in_meter_h > small.in_meter_h, "input meter did not grow");
         assert!(big.list_rows > small.list_rows, "list did not grow");
@@ -312,7 +362,7 @@ mod tests {
     #[test]
     fn the_spectrum_fits_between_the_header_and_the_prompt() {
         for h in [24u16, 30, 60, 100] {
-            let l = Layout::new(80, h);
+            let l = Layout::lite(80, h);
             let (top, rows) = l.spectrum();
             assert!(rows >= 1, "h={h}: no room for the spectrum");
             assert!(top > l.row_header, "h={h}: spectrum overwrites the header");

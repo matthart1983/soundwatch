@@ -17,6 +17,10 @@ pub mod worker;
 pub struct Levels {
     pub out_dbfs: Option<f32>,
     pub in_dbfs: Option<f32>,
+    /// RMS over the same window. The gap between this and the peak is the
+    /// crest factor, which the Meters tab shows and nothing else can derive.
+    pub out_rms_dbfs: Option<f32>,
+    pub in_rms_dbfs: Option<f32>,
 }
 
 /// A window of mono audio for the spectrum screen, and where it came from.

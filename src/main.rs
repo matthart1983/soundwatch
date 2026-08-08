@@ -1,7 +1,8 @@
-//! SoundWatch Lite — a read-only audio diagnostics TUI.
+//! SoundWatch — read-only audio diagnostics for macOS, in ten tabs.
 //!
-//! One screen, five keys, four colours. Read-only: no volume, mute, routing or
-//! default changes, and nothing is ever written back to the audio system.
+//! Read-only throughout: no volume, mute, routing or default changes, and
+//! nothing is ever written back to the audio system. `--lite` is the original
+//! single screen, kept at the handoff's exact rows and columns.
 //!
 //! Output metering uses a Core Audio process tap (macOS 14.2+), which observes
 //! without altering what anyone hears — see [`backend::tap`] for why that
@@ -25,6 +26,7 @@ mod layout;
 mod meter;
 mod model;
 mod spectrum;
+mod tabs;
 mod tcc;
 mod theme;
 mod ui;
@@ -48,7 +50,7 @@ use backend::AudioBackend;
 use backend::coreaudio::CoreAudio;
 
 const USAGE: &str = "\
-soundwatch-lite — read-only audio diagnostics, one screen
+soundwatch — read-only audio diagnostics for macOS, in ten tabs
 
 USAGE:
     soundwatch-lite [OPTIONS]
@@ -68,13 +70,15 @@ OPTIONS:
                       single-width in every terminal. Forces blocks over
                       braille, whatever the theme asks for.
     --once <STATE>    render one frame to stdout and exit. STATE is one of
-                      main, paused, filter, detail, alert, help, spectrum,
-                      settings
+                      main, paused, filter, detail, alert, help, settings, or
+                      any tab by name: overview, devices, streams, meters,
+                      spectrum, latency, xruns, routing, timeline, insights
     --no-color        with --once, emit plain text
     --probe-tap       start the output tap, watch it for five seconds, and
                       report whether real samples arrive. Use this first when
                       the meters look flat.
     --defaults        ignore the saved settings for this run
+    --lite            the original single screen instead of the ten tabs
 
 SETTINGS:
     `,` opens a menu for everything above and rather more: meter and spectrum
@@ -86,8 +90,8 @@ SETTINGS:
     -V, --version     print version
 
 KEYS:
-    q quit    p pause    s spectrum    , settings    / filter
-    enter detail    ? help
+    1-0 tab    tab/shift-tab cycle tabs    q quit    p pause
+    , settings    / filter    enter detail    ? help
     up/down (or j/k) move the selection    esc close detail or clear filter
 ";
 
@@ -116,6 +120,7 @@ fn parse_args() -> Result<Args, String> {
                     .ok_or_else(|| format!("unknown theme: {name} (try spec or btop)"))?;
             }
             "--defaults" => a.cfg = config::Config::default(),
+            "--lite" => a.cfg.lite = true,
             "--demo" => a.demo = true,
             "--ascii" => a.cfg.ascii = true,
             "--no-color" => a.color = false,
@@ -388,9 +393,25 @@ fn render_once_at(
             }
             app.on_key(press(KeyCode::Char('x')));
         }
-        other => return Err(format!("unknown state: {other}")),
+        // Any tab by name, so every screen is reviewable without a terminal.
+        // Last, so it never shadows a named state above it.
+        name => {
+            let Some(t) =
+                crate::tabs::Tab::ALL.iter().find(|t| t.name().eq_ignore_ascii_case(name))
+            else {
+                return Err(format!("unknown state: {name}"));
+            };
+            app.select_tab(*t);
+            if *t == crate::tabs::Tab::Spectrum && app.demo {
+                app.seed_demo_spectrum();
+            }
+        }
     }
 
+    finish(app, w, h, color)
+}
+
+fn finish(app: &mut App, w: u16, h: u16, color: bool) -> Result<String, String> {
     let area = Rect::new(0, 0, w, h);
     app.set_viewport(w, h);
     let mut buf = Buffer::empty(area);
@@ -447,7 +468,7 @@ mod tests {
     }
 
     fn frame_themed(state: &str, w: u16, h: u16, th: theme::Theme) -> Vec<String> {
-        let mut app = App::demo(config::Config { theme: th, ..Default::default() });
+        let mut app = App::demo(config::Config { theme: th, lite: true, ..Default::default() });
         let s = render_once_at(&mut app, state, false, w, h).expect("render");
         s.lines().map(str::to_owned).collect()
     }
@@ -463,7 +484,7 @@ mod tests {
 
     /// The spec's layout, for the tests that assert the spec's row numbers.
     fn spec() -> crate::layout::Layout {
-        crate::layout::Layout::new(grid::MIN_COLS, grid::MIN_ROWS)
+        crate::layout::Layout::lite(grid::MIN_COLS, grid::MIN_ROWS)
     }
 
     /// Every rendered line must fit the grid. This is the regression test for
@@ -524,7 +545,7 @@ mod tests {
     /// A crowded list, which is the normal case on a desktop and the one the
     /// eight-row fixture never exercises.
     fn crowded_frame_at(w: u16, h: u16) -> Vec<String> {
-        let mut app = App::demo(config::Config::default());
+        let mut app = App::demo(config::Config { lite: true, ..Default::default() });
         let template = app.snap.streams[0].clone();
         for i in 0..40 {
             let mut s = template.clone();
@@ -541,7 +562,7 @@ mod tests {
     fn a_taller_terminal_shows_more_streams() {
         // Count the rows actually drawn between the table rule and the prompt.
         let drawn = |w: u16, h: u16| {
-            let l = crate::layout::Layout::new(w, h);
+            let l = crate::layout::Layout::lite(w, h);
             let f = crowded_frame_at(w, h);
             (l.row_table_rule as usize + 1..l.row_prompt as usize)
                 .filter(|&i| !f[i].trim().is_empty())
@@ -644,6 +665,91 @@ mod tests {
         assert_eq!(f[19].find('\u{2514}'), Some(3), "corner glyph misplaced: {:?}", f[19]);
     }
 
+    /// The full product's chrome and all ten tabs, at every size. This is the
+    /// same overflow guard the Lite screen has always had, applied to ten more
+    /// screens — most of which draw tables whose columns are computed from the
+    /// terminal width and would otherwise be free to run off it.
+    #[test]
+    fn every_tab_fits_every_terminal_size() {
+        for &(w, h) in SIZES {
+            for t in crate::tabs::Tab::ALL {
+                let mut app = App::demo(config::Config::default());
+                let s = render_once_at(&mut app, t.name(), false, w, h).expect("render");
+                let lines: Vec<String> = s.lines().map(str::to_owned).collect();
+                assert_grid(&lines, w, h);
+                // The chrome has to survive too: the bar, the active tab and
+                // the footer are what make the other nine reachable.
+                let joined = lines.join("\n");
+                assert!(joined.contains("SoundWatch"), "{:?} at {w}x{h}: no header", t);
+                assert!(
+                    joined.contains(&format!("[{}]", t.digit())),
+                    "{:?} at {w}x{h}: its own tab is not in the bar",
+                    t
+                );
+                assert!(joined.contains("? help"), "{:?} at {w}x{h}: no footer", t);
+            }
+        }
+    }
+
+    /// Every tab has to draw *something*. A blank body is indistinguishable
+    /// from a broken renderer, and the fixtures give all ten real data.
+    #[test]
+    fn no_tab_renders_an_empty_body() {
+        for t in crate::tabs::Tab::ALL {
+            let mut app = App::demo(config::Config::default());
+            let s = render_once_at(&mut app, t.name(), false, 130, 36).expect("render");
+            let l = crate::layout::Layout::new(130, 36, crate::layout::Chrome::Tabs);
+            let lines: Vec<String> = s.lines().map(str::to_owned).collect();
+            let filled = (l.body_top as usize..(l.body_top + l.body_rows) as usize)
+                .filter(|i| lines.get(*i).is_some_and(|s| !s.trim().is_empty()))
+                .count();
+            assert!(filled >= 2, "{:?} drew {filled} non-blank body rows", t);
+        }
+    }
+
+    /// Digits switch tabs, and the tab that is drawn is the tab that was asked
+    /// for — the bar highlighting one screen while another is drawn would be a
+    /// very confusing bug to find later.
+    #[test]
+    fn digits_select_the_tab_they_name() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = App::demo(config::Config::default());
+        app.set_viewport(130, 36);
+        for t in crate::tabs::Tab::ALL {
+            app.on_key(KeyEvent::new(KeyCode::Char(t.digit()), KeyModifiers::NONE));
+            assert_eq!(app.tab, t, "digit {} selected the wrong tab", t.digit());
+        }
+        // And the arrows walk the whole bar and come back.
+        let start = app.tab;
+        for _ in 0..crate::tabs::Tab::ALL.len() {
+            app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        }
+        assert_eq!(app.tab, start, "a full cycle of Tab did not return");
+    }
+
+    /// Opening the Spectrum tab is what starts the audio flowing; leaving it
+    /// has to stop it, or the backend ships windows nobody is looking at.
+    #[test]
+    fn the_spectrum_tab_owns_the_audio_request() {
+        let mut app = App::demo(config::Config::default());
+        assert!(!app.spectrum.source.is_on(), "audio was requested before it was needed");
+        app.select_tab(crate::tabs::Tab::Spectrum);
+        assert!(app.spectrum.source.is_on(), "the spectrum tab did not start the audio");
+        app.select_tab(crate::tabs::Tab::Devices);
+        assert!(!app.spectrum.source.is_on(), "leaving the tab left the audio running");
+    }
+
+    /// The Lite screen is still the Lite screen: --lite must not have grown a
+    /// tab bar, whatever the default is now.
+    #[test]
+    fn lite_has_no_tab_bar() {
+        let f = frame_at("main", 120, 40);
+        let joined = f.join("\n");
+        assert!(!joined.contains("[2] Devices"), "the Lite screen grew a tab bar");
+        assert!(joined.contains("s spectrum"), "Lite lost its spectrum key");
+        assert!(f[spec().row_out_label as usize].contains("dBFS out"));
+    }
+
     /// The spectrum screen has to render its graph, its axis and its verdict,
     /// at every size, and it has to name the faults in the fixture.
     #[test]
@@ -689,6 +795,7 @@ mod tests {
     fn ascii_overrides_the_braille_theme() {
         let mut app = App::demo(config::Config {
             ascii: true,
+            lite: true,
             theme: theme::Theme::Btop,
             ..Default::default()
         });
@@ -706,13 +813,12 @@ mod tests {
         for &(w, h) in SIZES {
             let f = frame_at("settings", w, h);
             let joined = f.join("\n");
+            // The same config the frame helper renders with, or the values
+            // asserted here are not the values on screen.
+            let cfg = config::Config { lite: true, ..Default::default() };
             for s in crate::config::Setting::ALL {
                 assert!(joined.contains(s.label()), "{w}x{h}: no row for {:?}", s);
-                assert!(
-                    joined.contains(&s.value(&crate::config::Config::default())),
-                    "{w}x{h}: no value shown for {:?}",
-                    s
-                );
+                assert!(joined.contains(&s.value(&cfg)), "{w}x{h}: no value shown for {:?}", s);
             }
             assert!(joined.contains("w write"), "{w}x{h}: the menu does not say how to save");
             assert!(joined.contains("settings"), "{w}x{h}: the panel has no title");
@@ -725,7 +831,7 @@ mod tests {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let press = |c: KeyCode| KeyEvent::new(c, KeyModifiers::NONE);
 
-        let mut app = App::demo(config::Config::default());
+        let mut app = App::demo(config::Config { lite: true, ..Default::default() });
         app.set_viewport(120, 40);
         let before = render_once_at(&mut app, "main", false, 120, 40).expect("render");
 
