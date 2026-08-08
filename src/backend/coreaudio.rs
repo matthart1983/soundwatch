@@ -86,6 +86,9 @@ pub struct CoreAudio {
     /// `(observed_at, count)` pairs, pruned to the trailing 60 seconds.
     xrun_window: VecDeque<(Timestamp, u32)>,
     last_xrun_total: u64,
+    /// When the counter was last read, so a stale delta is not attributed to
+    /// the moment it was noticed. See [`CoreAudio::xruns_60s`].
+    last_xrun_read: Option<Timestamp>,
     /// First time each stream key was seen, for the hold column.
     first_seen: HashMap<String, Timestamp>,
     has_process_api: bool,
@@ -95,6 +98,9 @@ pub struct CoreAudio {
     tap: Pending<super::tap::LevelTap>,
     /// Input metering, same four states.
     input: Pending<super::input::InputMeter>,
+    /// Which device the last input-meter attempt was for. Stops a device that
+    /// genuinely cannot be opened from being retried every single tick.
+    last_input_attempt: Option<AudioObjectID>,
     /// Set at each tick when some process is playing to the default output.
     /// Corroborates a silent tap; see [`CoreAudio::output_meter_is_deaf`].
     output_is_busy: bool,
@@ -104,6 +110,12 @@ pub struct CoreAudio {
 /// enough that a pause between tracks is never mistaken for a permission
 /// problem.
 const DEAF_AFTER_SECS: u64 = 8;
+
+/// How stale a reading of the xrun counter may be and still be attributed to
+/// the moment it was taken. The tick is 1 Hz, so this is generous enough to
+/// absorb a slow frame and short enough that a pause, a sleep or a stopped
+/// process can never masquerade as a burst of dropouts.
+const XRUN_GAP_SECS: u64 = 5;
 
 impl Default for CoreAudio {
     fn default() -> Self {
@@ -132,11 +144,13 @@ impl CoreAudio {
             host: ffi::hostname(),
             xrun_window: VecDeque::new(),
             last_xrun_total: 0,
+            last_xrun_read: None,
             first_seen: HashMap::new(),
             has_process_api,
             metering,
             tap,
             input,
+            last_input_attempt: None,
             output_is_busy: false,
         }
     }
@@ -250,13 +264,28 @@ impl CoreAudio {
     ///
     /// The output tap needs no equivalent: it is a *global* tap of the system
     /// mix, so it follows the default output on its own.
+    ///
+    /// A failure has to be retried, not latched. Unplugging an interface is a
+    /// two-step event as macOS sees it — the default input disappears for a
+    /// moment before another device takes over — so a restart triggered by the
+    /// first step lands on "no default input device" and fails. Without a
+    /// retry, plugging anything back in would never bring the meter back, and
+    /// the hot-plug this function exists for is exactly the case that broke it.
     fn follow_default_input(&mut self) {
         if !self.metering.input {
             return;
         }
-        let Some(live) = self.input.live() else { return };
         let current = Self::default_device(false);
-        if current != Some(live.device()) {
+        let restart = match &self.input {
+            // Metering the wrong device.
+            Pending::Live(live) => current != Some(live.device()),
+            // Failed earlier; try again once there is a device to try.
+            Pending::Failed(_) => current.is_some() && current != self.last_input_attempt,
+            // Off, or still opening — leave it alone.
+            _ => false,
+        };
+        if restart {
+            self.last_input_attempt = current;
             self.input = Pending::spawn(super::input::InputMeter::start);
         }
     }
@@ -264,13 +293,32 @@ impl CoreAudio {
     /// Roll the atomic counter into a trailing-60-second count.
     ///
     /// A lifetime counter is noise — what matters is what just happened.
+    ///
+    /// The counter keeps rising whether or not anyone is reading it, and it is
+    /// read from the 1 Hz tick, which stops while paused and does not run at
+    /// all while the machine is asleep. So a delta is only evidence about
+    /// *when* if it was taken recently: resume after an hour paused and the
+    /// naive reading credits an hour of overloads to this instant, paints the
+    /// header red and blames the buffer size, for events that may have
+    /// happened while the lid was shut. Past [`XRUN_GAP_SECS`] the delta is
+    /// discarded and the baseline just moves — the count is unknowable rather
+    /// than large, and this row says so by staying quiet.
     fn xruns_60s(&mut self, now: Timestamp) -> u32 {
         let total = XRUNS.load(Ordering::Relaxed);
         let delta = total.saturating_sub(self.last_xrun_total);
+        let gap = self.last_xrun_read.map(|t| now.secs_since(t));
         self.last_xrun_total = total;
-        if delta > 0 {
+        self.last_xrun_read = Some(now);
+
+        let attributable = match gap {
+            // First read of the session: the counter started with us.
+            None => true,
+            Some(g) => g <= XRUN_GAP_SECS,
+        };
+        if delta > 0 && attributable {
             self.xrun_window.push_back((now, delta as u32));
         }
+
         while let Some(&(at, _)) = self.xrun_window.front() {
             if now.secs_since(at) >= 60 {
                 self.xrun_window.pop_front();
@@ -690,6 +738,19 @@ mod tests {
         v.iter().copied().collect()
     }
 
+    /// `XRUNS` is process-wide, so the tests that drive it have to take turns.
+    static XRUN_TEST: Mutex<()> = Mutex::new(());
+
+    /// Start from a known counter value, holding the lock for the test.
+    fn xrun_fixture() -> (CoreAudio, std::sync::MutexGuard<'static, ()>) {
+        let guard = XRUN_TEST.lock().unwrap_or_else(|e| e.into_inner());
+        let mut be = observer();
+        XRUNS.store(0, Ordering::Relaxed);
+        be.last_xrun_total = 0;
+        be.last_xrun_read = None;
+        (be, guard)
+    }
+
     #[test]
     fn a_steady_device_list_re_registers_nothing() {
         let devices = ids(&[1, 2, 3]);
@@ -720,6 +781,42 @@ mod tests {
         let (add, drop) = listener_delta(&ids(&[1, 4]), &ids(&[1, 3]));
         assert_eq!(add, vec![4]);
         assert_eq!(drop, vec![3]);
+    }
+
+    /// The counter keeps climbing while the tick is not running. Resuming must
+    /// not credit all of it to the moment of resume — that paints the header
+    /// red and blames the buffer size for events that may have happened while
+    /// the machine was asleep.
+    #[test]
+    fn a_backlog_of_xruns_is_not_reported_as_a_burst() {
+        let (mut be, _turn) = xrun_fixture();
+
+        // A normal reading at t=0 establishes the baseline.
+        assert_eq!(be.xruns_60s(Timestamp(0)), 0);
+
+        // 30 overloads accumulate while paused for ten minutes.
+        XRUNS.store(30, Ordering::Relaxed);
+        let after_pause = be.xruns_60s(Timestamp(600_000));
+        assert_eq!(after_pause, 0, "a ten-minute backlog was reported as happening now");
+
+        // The baseline still moved, so the next real overload counts once.
+        XRUNS.store(31, Ordering::Relaxed);
+        assert_eq!(
+            be.xruns_60s(Timestamp(601_000)),
+            1,
+            "discarding the backlog must not double-count afterwards"
+        );
+    }
+
+    #[test]
+    fn xruns_inside_the_window_are_still_counted() {
+        let (mut be, _turn) = xrun_fixture();
+        assert_eq!(be.xruns_60s(Timestamp(0)), 0);
+
+        XRUNS.store(4, Ordering::Relaxed);
+        assert_eq!(be.xruns_60s(Timestamp(1_000)), 4, "a live burst must be reported");
+        // And it ages out of the trailing window.
+        assert_eq!(be.xruns_60s(Timestamp(62_000)), 0);
     }
 
     #[test]

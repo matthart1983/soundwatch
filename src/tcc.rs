@@ -33,7 +33,7 @@
 //! rather than linked, so a macOS that drops it degrades to "metering
 //! unavailable, here is why" instead of failing to launch.
 
-use std::ffi::{CString, c_char, c_int, c_void};
+use std::ffi::{CString, OsString, c_char, c_int, c_void};
 use std::os::unix::ffi::OsStrExt;
 
 /// Set in the re-executed image so it does not re-execute again.
@@ -152,6 +152,29 @@ fn disclaim_fn() -> Option<SetDisclaimFn> {
     Some(unsafe { std::mem::transmute::<*mut c_void, SetDisclaimFn>(sym) })
 }
 
+/// The environment for the re-executed image: everything we have, with exactly
+/// one [`DISCLAIM_ENV`] entry set to `1`.
+///
+/// This is the loop guard, and getting it wrong means an `exec` bomb rather
+/// than a wrong pixel — so it is a pure function over an iterator, testable
+/// without touching the real environment. (Mutating the process environment in
+/// a test is not safe: `setenv` reallocates `environ` while sibling test
+/// threads are inside CoreFoundation calling `getenv`, which is exactly why
+/// edition 2024 made `set_var` unsafe.)
+fn env_with_marker(vars: impl Iterator<Item = (OsString, OsString)>) -> Vec<CString> {
+    let mut out: Vec<CString> = vars
+        .filter(|(k, _)| k != DISCLAIM_ENV)
+        .filter_map(|(k, v)| {
+            let mut b = k.as_bytes().to_vec();
+            b.push(b'=');
+            b.extend_from_slice(v.as_bytes());
+            CString::new(b).ok()
+        })
+        .collect();
+    out.push(CString::new(format!("{DISCLAIM_ENV}=1")).expect("no NUL in a literal"));
+    out
+}
+
 /// Re-execute this process as its own TCC subject.
 ///
 /// On success this **does not return** — `POSIX_SPAWN_SETEXEC` replaces the
@@ -183,16 +206,7 @@ pub fn adopt_own_identity() -> Result<std::convert::Infallible, String> {
     argv.push(std::ptr::null_mut());
 
     // The environment, plus the marker that stops the next image looping.
-    let mut env_owned: Vec<CString> = std::env::vars_os()
-        .filter(|(k, _)| k != DISCLAIM_ENV)
-        .filter_map(|(k, v)| {
-            let mut b = k.as_bytes().to_vec();
-            b.push(b'=');
-            b.extend_from_slice(v.as_bytes());
-            CString::new(b).ok()
-        })
-        .collect();
-    env_owned.push(CString::new(format!("{DISCLAIM_ENV}=1")).expect("no NUL"));
+    let env_owned = env_with_marker(std::env::vars_os());
     let mut envp: Vec<*mut c_char> = env_owned.iter().map(|e| e.as_ptr() as *mut c_char).collect();
     envp.push(std::ptr::null_mut());
 
@@ -244,20 +258,48 @@ mod tests {
         );
     }
 
+    fn vars(pairs: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
+        pairs.iter().map(|(k, v)| ((*k).into(), (*v).into())).collect()
+    }
+
+    /// The re-executed image has to be able to tell that it is the second one,
+    /// or `adopt_own_identity` is an exec bomb.
     #[test]
-    fn the_marker_env_var_is_what_stops_the_loop() {
-        // The re-executed image must be able to tell it is the second one, or
-        // adopt_own_identity() would exec forever.
-        let saved = std::env::var_os(DISCLAIM_ENV);
-        // SAFETY: single-threaded assertion on a variable only this test touches.
-        unsafe { std::env::set_var(DISCLAIM_ENV, "1") };
-        assert!(is_own_subject());
-        assert!(adopt_own_identity().is_err(), "must refuse to exec twice");
-        unsafe {
-            match saved {
-                Some(v) => std::env::set_var(DISCLAIM_ENV, v),
-                None => std::env::remove_var(DISCLAIM_ENV),
-            }
+    fn the_marker_is_always_set_exactly_once() {
+        let env = env_with_marker(vars(&[("PATH", "/usr/bin"), ("TERM", "xterm")]).into_iter());
+        let marker: Vec<_> =
+            env.iter().filter(|e| e.to_bytes().starts_with(DISCLAIM_ENV.as_bytes())).collect();
+        assert_eq!(marker.len(), 1, "the loop guard must appear exactly once");
+        assert_eq!(marker[0].to_str().unwrap(), "SOUNDWATCH_TCC_DISCLAIMED=1");
+    }
+
+    /// An inherited marker — from a shell that exported it, or a re-exec that
+    /// somehow happened twice — must not produce a duplicate entry, because
+    /// which of two conflicting values `getenv` returns is not something to
+    /// bet the guard on.
+    #[test]
+    fn an_inherited_marker_is_replaced_not_duplicated() {
+        let env = env_with_marker(vars(&[(DISCLAIM_ENV, "0"), ("PATH", "/usr/bin")]).into_iter());
+        let marker: Vec<_> =
+            env.iter().filter(|e| e.to_bytes().starts_with(DISCLAIM_ENV.as_bytes())).collect();
+        assert_eq!(marker.len(), 1, "stale marker was kept alongside the new one");
+        assert_eq!(marker[0].to_str().unwrap(), "SOUNDWATCH_TCC_DISCLAIMED=1");
+    }
+
+    #[test]
+    fn the_rest_of_the_environment_survives_the_hand_off() {
+        let env = env_with_marker(vars(&[("PATH", "/usr/bin"), ("TERM", "xterm")]).into_iter());
+        let strs: Vec<&str> = env.iter().filter_map(|e| e.to_str().ok()).collect();
+        assert!(strs.contains(&"PATH=/usr/bin"));
+        assert!(strs.contains(&"TERM=xterm"), "TERM matters to a TUI");
+    }
+
+    #[test]
+    fn a_disclaimed_process_refuses_to_exec_again() {
+        // Whatever this process actually is, the guard and the entry point must
+        // agree — no environment mutation required to check that.
+        if is_own_subject() {
+            assert!(adopt_own_identity().is_err(), "must refuse to exec twice");
         }
     }
 }

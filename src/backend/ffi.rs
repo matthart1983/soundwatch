@@ -195,6 +195,14 @@ pub fn get<T: Copy>(id: AudioObjectID, a: &AudioObjectPropertyAddress) -> Option
 }
 
 /// Read a variable-length array of fixed-size values.
+///
+/// `ioDataSize` is an in/out parameter and the HAL will write up to whatever it
+/// is told. It must therefore describe the buffer we actually allocated, not
+/// the size the HAL quoted: those differ whenever the quoted size is not a
+/// whole number of `T`, and the capacity is the one that is real. Handing over
+/// the quoted size lets the HAL write past the allocation, and a quote smaller
+/// than a single `T` is worse — the capacity is zero, so `as_mut_ptr` is a
+/// dangling alignment sentinel rather than memory.
 pub fn get_array<T: Copy>(id: AudioObjectID, a: &AudioObjectPropertyAddress) -> Vec<T> {
     unsafe {
         let mut size: u32 = 0;
@@ -202,7 +210,12 @@ pub fn get_array<T: Copy>(id: AudioObjectID, a: &AudioObjectPropertyAddress) -> 
             return Vec::new();
         }
         let cap = size as usize / size_of::<T>();
+        if cap == 0 {
+            return Vec::new();
+        }
         let mut v: Vec<T> = Vec::with_capacity(cap);
+        // Clamp to what was allocated before handing the pointer over.
+        size = (cap * size_of::<T>()) as u32;
         if AudioObjectGetPropertyData(id, a, 0, null(), &mut size, v.as_mut_ptr() as *mut c_void)
             != 0
         {
