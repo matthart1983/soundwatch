@@ -146,7 +146,7 @@ impl Config {
 
     pub fn serialise(&self) -> String {
         let mut s = String::new();
-        s.push_str("# soundwatch-lite settings. Written by the `,` menu.\n");
+        s.push_str("# soundwatch settings. Written by the `,` menu.\n");
         s.push_str("# Delete this file to go back to the defaults.\n\n");
         let _ = writeln!(s, "theme = \"{}\"", self.theme.name());
         let _ = writeln!(s, "ascii = {}", self.ascii);

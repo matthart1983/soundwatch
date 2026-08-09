@@ -238,7 +238,7 @@ impl LevelTap {
         match st {
             // 'nope' — the usual refusal.
             0x6E6F7065 | -1 => "audio capture not permitted: allow \
-                 \"soundwatch-lite\" under Privacy & Security"
+                 \"soundwatch\" under Privacy & Security"
                 .into(),
             _ => format!("could not create the audio tap (OSStatus {st})"),
         }

@@ -281,6 +281,16 @@ impl App {
         if self.paused {
             return;
         }
+        // In demo mode the fixtures are the signal: drive the analyser from
+        // them so `--demo` exercises the spectrum the way it exercises every
+        // other screen, rather than sitting on "waiting for audio".
+        if self.demo && self.spectrum.source.is_on() {
+            let t = self.started.elapsed().as_secs_f32();
+            let w = self.layout.content.width() * self.sub_columns() as u16;
+            let sig = crate::demo::spectrum_signal_at(t);
+            self.spectrum.push(&sig, 48_000, w, SAMPLE_INTERVAL.as_secs_f32());
+            self.spectrum_fed = true;
+        }
         // A source that stops delivering must fall away rather than freeze
         // mid-air. Only when nothing arrived this frame: `push` already
         // advanced the ballistics for the frames that did.

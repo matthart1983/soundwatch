@@ -19,14 +19,14 @@
 	<key>CFBundleIdentifier</key>
 	<string>com.soundwatch.lite</string>
 	<key>CFBundleName</key>
-	<string>SoundWatch Lite</string>
+	<string>SoundWatch</string>
 	<key>CFBundleExecutable</key>
-	<string>soundwatch-lite</string>
+	<string>soundwatch</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>NSAudioCaptureUsageDescription</key>
-	<string>SoundWatch Lite reads the level of the audio your Mac is playing so it can draw the output meter. Nothing is recorded, written to disk, or sent anywhere.</string>
+	<string>SoundWatch reads the level of the audio your Mac is playing so it can draw the output meter. Nothing is recorded, written to disk, or sent anywhere.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>SoundWatch Lite reads the level of your input device so it can draw the input meter. Nothing is recorded, written to disk, or sent anywhere.</string>
+	<string>SoundWatch reads the level of your input device so it can draw the input meter. Nothing is recorded, written to disk, or sent anywhere.</string>
 </dict>
 </plist>

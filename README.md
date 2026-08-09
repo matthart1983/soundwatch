@@ -1,136 +1,103 @@
 # SoundWatch
 
-A read-only audio diagnostics TUI for macOS. Ten tabs, one question:
-**why does my audio sound wrong?**
+**Read-only audio diagnostics for macOS, in ten tabs.** One question:
+*why does my audio sound wrong?*
 
-Fourth member of the family after NetWatch, SysWatch and DiskWatch. The
-single-screen **Lite** original is still here behind `--lite`, at the
-`design_handoff_soundwatch` spec's exact rows and columns.
+![SoundWatch](docs/media/demo.gif)
 
-```
-● SoundWatch 0.1.0  │  host jules-mbp  coreaudio                          LIVE
-[1] Overview [2] Devices 6 [3] Streams 8 [4] Meters [5] Spectrum [6] Latency …
-┘           └───────────────────────────────────────────────────────────────────
- OUTPUT         RATE           BUFFER         LATENCY        XRUNS 60s
- -13.1          48k/24         128fr          11.8ms         0
-```
+Fourth member of the family after [NetWatch](https://github.com/matthart1983/netwatch),
+[SysWatch](https://github.com/matthart1983/syswatch) and
+[DiskWatch](https://github.com/matthart1983/diskwatch).
+
+---
+
+## What it answers
 
 | # | tab | what it answers |
 |---|---|---|
-| 1 | Overview | is anything wrong right now |
-| 2 | Devices | what exists, how it is attached, what it is running at |
-| 3 | Streams | which app has the microphone, and what is making that noise |
-| 4 | Meters | peak *and* RMS, and the crest factor between them |
-| 5 | Spectrum | what is *in* the signal — hum, band limits, DC |
-| 6 | Latency | where the milliseconds actually went |
-| 7 | Xruns | when it dropped out, on which device |
-| 8 | Routing | what your "device" is really built out of |
-| 9 | Timeline | what changed while you were not looking |
-| 0 | Insights | all of the above, in plain English |
+| 1 | **Overview** | is anything wrong right now |
+| 2 | **Devices** | what exists, how it is attached, what it is running at |
+| 3 | **Streams** | which app has the microphone, and what is making that noise |
+| 4 | **Meters** | peak *and* RMS, and the crest factor between them |
+| 5 | **Spectrum** | what is *in* the signal — hum, band limits, DC offset |
+| 6 | **Latency** | where the milliseconds actually went |
+| 7 | **Xruns** | when it dropped out, on which device |
+| 8 | **Routing** | what your "device" is really built out of |
+| 9 | **Timeline** | what changed while you were not looking |
+| 0 | **Insights** | all of the above, in plain English |
 
-`1`–`0` select a tab, `Tab`/`⇧Tab` walk them.
-
-**On the tab list.** There is no `design_handoff_soundwatch` for the full
-product — only the Lite one. The chrome here is the family's, taken from
-`design_handoff_syswatch/source/syswatch/sw-chrome.jsx` down to the active
-tab's `┘ └` inset. The ten tabs are *derived* from the family taxonomy
-(Overview first, Insights last, Timeline beside it) applied to the audio
-domain. They are not specified, and this file says so rather than implying
-otherwise.
+The last one is the point. Everything else asks you to read a number and know
+what it means; Insights reads them for you and says which tab to open:
 
 ```
- soundwatch  Mac · coreaudio                                   ● 48k/32 · 512fr
+▌ WARN   a device changed format mid-session
+▌ AirPods Pro: 48k/24 → 16k/16. A rate change under a running stream is heard as a glitch.
+▌ [9] Timeline
 
- ⯈  -8.9 dBFS out                       peak -8.9  48k/32  MacBook Pro Speakers
-                                                                         ▄  ▄
-                                                                         █  █
- ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁█▄▁█▂▁
- ⯇ -33.6 dBFS in                             peak -29.8  MacBook Pro Microphone
-
- ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▃▄▄▇▇█
-  60s ago ──────────────────────────────────────────────────────────────── now
- rate 48k   buffer 512fr   latency 69.7ms   xruns 0                 all nominal
- per-app levels are not reported by the CoreAudio HAL
- APP             DEVICE                      LEVEL       RATE     LAT 60s
- ──────────────────────────────────────────────────────────────────────────────
- corespeechd     ● MacBook Pro Micropho         --     48k/32  41.7ms
- afplay          MacBook Pro Speakers           --     48k/32  28.0ms
- WebKit.GPU      MacBook Pro Speakers           --     48k/32  28.0ms
+▌ NOTE   AirPods Pro is on bluetooth
+▌ Bluetooth resamples and compresses. If it also has a microphone open, macOS
+▌ drops the output to headset quality.
+▌ [2] Devices
 ```
 
-## Build and run
+## Install
 
-Build with `make`, not `cargo build` — see [Consent](#consent-and-why-there-is-a-makefile)
-for why. Cargo alone produces a binary whose meters can never read anything.
+Requires macOS 14.2 or newer (the process-tap API) and a Rust toolchain.
+
+```sh
+git clone https://github.com/matthart1983/soundwatch
+cd soundwatch
+make install          # builds, signs, and installs to /usr/local/bin
+soundwatch
+```
+
+**Build with `make`, not `cargo build`.** Cargo alone produces a binary whose
+meters can never read anything — see [Consent](#consent-and-why-there-is-a-makefile),
+which is the most interesting thing in this repository.
 
 ```sh
 make                  # release build, signed, ready to meter
 make run              # debug build, signed, run against the live audio stack
 make probe            # is metering actually receiving samples?
-make check            # what CI runs: fmt, clippy -D warnings, tests
-make install          # into /usr/local/bin
+make check            # fmt, clippy -D warnings, tests
+make hooks            # refuse commits that fail any of the above
 
-cargo run -- --demo   # the design fixtures — touches no audio device at all
+soundwatch --demo     # the design fixtures — touches no audio device at all
 ```
+
+## Keys
+
+`1`–`0` select a tab · `Tab`/`⇧Tab` cycle · `,` settings · `/` filter ·
+`↵` detail · `?` help · `p` pause · `q` quit · `↑↓` (or `j`/`k`) move the
+selection · `esc` closes whatever is open.
+
+Seven keys and the version string do not fit an 80-column footer, so two things
+give way in order: the version drops its name to a bare number, and then keys
+are shed — from the *second* to last, never the last, because the last one is
+`?` and it is the key that explains all the others.
+
+## Flags
 
 | flag | effect |
 |---|---|
-| `--demo` | drive the UI from the handoff's deterministic fixtures; opens nothing |
+| `--demo` | drive the UI from deterministic fixtures; opens nothing |
+| `--lite` | the original single screen, at the handoff's exact rows |
 | `--meter-input` | also meter the default input device (see [Input](#input-is-opt-in)) |
 | `--theme <name>` | `spec` (default) or `btop` — see [Themes](#themes) |
-| `--defaults` | ignore the saved settings for this run |
-| `--lite` | the original single screen, at the handoff's exact rows |
 | `--ascii` | ASCII stand-ins for glyphs that are not reliably single-width |
-| `--once <state>` | render `main`, `paused`, `filter`, `detail`, `alert`, `help`, `spectrum` or `settings` and exit |
+| `--once <state>` | render one frame to stdout and exit — any tab by name, or `main`, `paused`, `filter`, `detail`, `alert`, `help`, `settings` |
 | `--no-color` | with `--once`, emit plain text |
 | `--probe-tap` | start the tap, watch it for five seconds, report what arrived |
+| `--defaults` | ignore the saved settings for this run |
 
-## The spectrum screen
+## On the tab list
 
-`s` cycles the main screen through **off → output → input → off**. It replaces
-the meters and the stream table, because the question has changed from *which
-app* to *what is in this signal*.
-
-```
- ⯈ output   4096pt hann   11.7 Hz/bin                        peak 641 Hz  -18.2
-                                              ▁▁
-                                          ▁▁ ▁  ▁         ▁
-                            ▁▁▁▁▁▁ ▁           ▇      ▁      ▁
- ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▂▂▁▁▁▁██████████████████▅██████▃▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
- 20───────────────100─────────────────────1k──────────────────────10k──────────
- 50 Hz hum, 22 dB above the noise floor · check grounding and cable runs
-```
-
-That last line is the point. A spectrum display that does not **name** what it
-is showing is a screensaver, and these are faults the meters cannot see because
-the *level* is perfectly fine:
-
-| it says | it means |
-|---|---|
-| `50 Hz hum, 22 dB above the noise floor` | a ground loop — check your cable runs |
-| `content stops at 15.7 kHz` | a lossy source, or a Bluetooth codec quietly throwing away the top octave |
-| `DC offset on this path` | something is eating your headroom |
-| `the analyser is dropping audio` | the picture is behind the signal; do not trust it |
-
-Each needs three seconds of agreement before it will say anything, for the same
-reason one xrun does not paint the screen red.
-
-The axis is logarithmic from 20 Hz to Nyquist, because pitch is and because a
-linear axis spends half its width on 12–24 kHz where nothing diagnostic ever
-happens. Below about 122 Hz the axis is finer than the transform, so the graph
-stair-steps — that is drawn honestly rather than smoothed into detail the FFT
-never had. Above it, each column takes the **maximum** of the bins it covers:
-averaging would hide the narrow peaks the screen exists to find.
-
-The transform is a hand-rolled radix-2 FFT (`src/dsp.rs`), for the same reason
-the CoreAudio bindings are hand-rolled — not speed, which is irrelevant at
-twenty-three transforms a second, but keeping the dependency tree at four
-crates. Its accuracy is pinned by tests: a full-scale sine must read 0.0 dBFS,
-energy must be conserved, and 50 Hz must be distinguishable from 60 Hz — which
-it is not by bin index at this resolution, only by interpolating the peak.
-
-`docs/SPECTRUM.md` is the specification, with the constants, the detector
-thresholds and the reasoning behind each.
+There is no `design_handoff_soundwatch` for the full product — only the Lite
+one. The chrome here is the family's, taken from
+`design_handoff_syswatch/source/syswatch/sw-chrome.jsx` down to the active tab's
+`┘ └` inset. The ten tabs are **derived** from the family taxonomy (Overview
+first, Insights last, Timeline beside it) applied to the audio domain. They are
+not specified, and this file says so rather than implying otherwise.
 
 ## Settings
 
@@ -218,17 +185,6 @@ horizontal is frequency resolution, and a poor one for a three-row meter, which
 is one more reason it is not the default. `--ascii` forces blocks whatever the
 theme asks for: that flag exists for terminals whose glyph coverage cannot be
 trusted, and braille is a far riskier bet than `▁▂▃`.
-
-## Keys
-
-`q` quit · `p` pause · `s` spectrum · `,` settings · `/` filter · `↵` detail ·
-`?` help · `↑↓` (or `j`/`k`) move the selection · `esc` close the spectrum,
-close detail, or clear the filter.
-
-Seven keys and the version string do not fit an 80-column footer, so two things
-give way in order: the version drops its name to a bare number, and then keys
-are shed — from the *second* to last, never the last, because the last one is
-`?` and it is the key that explains all the others.
 
 ## Read-only, by construction
 
@@ -397,11 +353,11 @@ arrow only, so a 24→16 truncation at the same rate rendered as unremarkable di
 text — despite the full tool calling it out with `insight_bit_depth_downgrade`.
 The column now shows `24→16` for that case.
 
-**A sixth key.** `s` opens the spectrum. The handoff specifies five keys, and
-this is the same trade as `?` and `↑↓`: the alternative is a screen that cannot
-be reached. At 80 columns six keys and the full version string overflow the
-footer by five, so the version compresses to its number rather than a key being
-dropped — the keys are functional and the version is decoration.
+**More keys than the spec allows.** The handoff specifies five; the full
+product needs `1`-`0` for the tabs, `,` for settings and `s` for the spectrum in
+Lite mode. Same trade as `?` and `↑↓` before them: the alternative is a screen
+that cannot be reached. What they overflow is the footer, and §Keys above
+describes what gives way.
 
 **80×24 is a floor, not a frame.** The handoff fixes the grid and says nothing
 about other sizes; the first build letterboxed, which wasted most of a
@@ -425,10 +381,15 @@ list; `esc` cancels. That resolves the collision with `↵ detail` on the same k
 `--record` write to disk. Lite does not record, but it shares the family's types,
 so the clock is wall-clock milliseconds from the start.
 
-**Glyphs.** `●` (U+25CF) is East-Asian-Ambiguous and renders double-width under
-some terminal configurations, which would shift the DEVICE column on every input
-row. `--ascii` swaps the risky glyphs; widths are computed as display widths
-throughout.
+**Glyphs.** The handoff fixes the direction arrows as `⯈`/`⯇` (U+2BC8/U+2BC7)
+and calls them "the least universal characters in the spec". That was an
+understatement — they are absent from JetBrains Mono and from every other common
+terminal font checked, and rendered as an empty box, which is how the first take
+of the demo recording came out. They are `▸`/`◂` (U+25B8/U+25C2) here: same
+shape, same weight, and they exist. `●` (U+25CF) is East-Asian-Ambiguous and
+renders double-width under some terminal configurations, which would shift the
+DEVICE column on every input row; `--ascii` swaps the risky glyphs, and widths
+are computed as display widths throughout.
 
 Two spec details were also **wrong in the prose and right in the renderer**: the
 detail-state selection index (`LITE.md` says 1, `so-lite.jsx` uses 2 — neither is
@@ -470,6 +431,7 @@ than a mangled layout.
 | `dsp.rs` | the FFT, the Hann window, and the normalisation that is usually wrong |
 | `spectrum.rs` | log frequency mapping, analyser ballistics, and the fault detectors |
 | `chart.rs` | bar charts in blocks or braille, shared by the meters and the spectrum |
+| `backend/ioproc.rs` | the real-time callback, and the seqlock the RMS pair rides on |
 | `config.rs` | every setting, the `,` menu's model, and the file it is saved in |
 | `tabs/` | the ten tabs and the chrome around them |
 | `backend/worker.rs` | the backend on its own thread, so a stalled HAL cannot freeze the UI |

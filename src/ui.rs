@@ -18,7 +18,7 @@ use crate::meter;
 use crate::model::{Stream, Verdict};
 use crate::theme;
 
-pub const VERSION: &str = concat!("soundwatch-lite ", env!("CARGO_PKG_VERSION"));
+pub const VERSION: &str = concat!("soundwatch ", env!("CARGO_PKG_VERSION"));
 /// What the footer falls back to when the full string will not fit.
 pub const SHORT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -125,10 +125,8 @@ pub fn render(app: &App, buf: &mut Buffer, area: Rect) {
 }
 
 fn too_small(buf: &mut Buffer, area: Rect) {
-    let msg = format!(
-        "soundwatch-lite needs {MIN_COLS}x{MIN_ROWS} (have {}x{})",
-        area.width, area.height
-    );
+    let msg =
+        format!("soundwatch needs {MIN_COLS}x{MIN_ROWS} (have {}x{})", area.width, area.height);
     let x = area.x + area.width.saturating_sub(width(&msg)) / 2;
     let y = area.y + area.height / 2;
     for (i, ch) in msg.chars().enumerate() {
@@ -964,7 +962,7 @@ fn help(c: &mut Canvas, l: &Layout, app: &App) {
     let y0 = (l.h.saturating_sub(panel_h)) / 2;
     let y1 = y0 + panel_h - 1;
     c.panel(outer, y0, y1, theme::FAINT, theme::BG);
-    c.text(outer, outer.x0 + 2, y0, " soundwatch-lite ", theme::FG, true);
+    c.text(outer, outer.x0 + 2, y0, " soundwatch ", theme::FG, true);
 
     let inner = Field::new(outer.x0 + 2, outer.x1 - 2);
     let keys: &[(&str, &str)] = &[

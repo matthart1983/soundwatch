@@ -53,7 +53,7 @@ const USAGE: &str = "\
 soundwatch — read-only audio diagnostics for macOS, in ten tabs
 
 USAGE:
-    soundwatch-lite [OPTIONS]
+    soundwatch [OPTIONS]
 
 OPTIONS:
     --demo            drive the UI from the design fixtures instead of the live
@@ -145,7 +145,7 @@ fn main() {
     let args = match parse_args() {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("soundwatch-lite: {e}\n\n{USAGE}");
+            eprintln!("soundwatch: {e}\n\n{USAGE}");
             std::process::exit(2);
         }
     };
@@ -177,7 +177,7 @@ fn main() {
             return once(&mut app, &state, args.color);
         }
         if let Err(e) = run(&mut app) {
-            eprintln!("soundwatch-lite: {e}");
+            eprintln!("soundwatch: {e}");
             std::process::exit(1);
         }
         return;
@@ -203,7 +203,7 @@ fn main() {
         App::live(backend::worker::BackendWorker::spawn(Box::new(be)), name, host, args.cfg);
 
     if let Err(e) = run(&mut app) {
-        eprintln!("soundwatch-lite: {e}");
+        eprintln!("soundwatch: {e}");
         std::process::exit(1);
     }
 }
@@ -219,7 +219,7 @@ fn once(app: &mut App, state: &str, color: bool) {
     match render_once(app, state, color) {
         Ok(s) => print!("{s}"),
         Err(e) => {
-            eprintln!("soundwatch-lite: {e}");
+            eprintln!("soundwatch: {e}");
             std::process::exit(2);
         }
     }
@@ -228,7 +228,7 @@ fn once(app: &mut App, state: &str, color: bool) {
 fn probe_tap(identity_error: Option<&str>) {
     use backend::tap::LevelTap;
 
-    println!("soundwatch-lite tap probe\n");
+    println!("soundwatch tap probe\n");
     println!("signed as     : {}", tcc::signing_identifier().unwrap_or_else(|| "unsigned".into()));
     match identity_error {
         None if tcc::is_own_subject() => {
@@ -283,7 +283,7 @@ fn probe_tap(identity_error: Option<&str>) {
              A tap without consent is not an error — it is silence, forever.\n\
              \n\
              Look in System Settings \u{203a} Privacy & Security \u{203a} Screen & System\n\
-             Audio Recording for \"soundwatch-lite\" and switch it on. If it is not\n\
+             Audio Recording for \"soundwatch\" and switch it on. If it is not\n\
              listed, no consent dialog was ever shown: run this probe again from a\n\
              normal login session, and answer the prompt."
         );
@@ -617,7 +617,7 @@ mod tests {
         assert!(f[spec().row_footer as usize].contains("? help"), "a key was shed at 80 columns");
         // With room, the full string comes back.
         let wide = frame_at("main", 120, 24);
-        assert!(wide[spec().row_footer as usize].contains("soundwatch-lite"));
+        assert!(wide[spec().row_footer as usize].contains("soundwatch"));
     }
 
     #[test]

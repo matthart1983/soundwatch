@@ -173,6 +173,14 @@ pub fn in_series() -> Vec<f32> {
 /// wall at 15.7 kHz — one fixture that exercises the transform, the axis, the
 /// ballistics and all three detectors, with no audio device anywhere.
 pub fn spectrum_signal() -> Vec<f32> {
+    spectrum_signal_at(0.0)
+}
+
+/// The same, moving. `t` is seconds; the tone and the noise breathe so the
+/// analyser has something to animate. `--demo` is the mode design review and
+/// screenshots run in, and a spectrum frozen on one frame demonstrates the
+/// renderer without demonstrating the ballistics.
+pub fn spectrum_signal_at(t: f32) -> Vec<f32> {
     let n = crate::dsp::FFT_SIZE;
     let rate = 48_000.0f32;
     let mut out = vec![0.0f32; n];
@@ -195,10 +203,15 @@ pub fn spectrum_signal() -> Vec<f32> {
         }
         f *= 1.06;
     }
+    // A slow sweep on the tone and a tremolo on the noise, so bars rise and
+    // fall and the peak markers have something to hold.
+    let sweep = 1000.0 * (1.0 + 0.35 * (t * 0.55).sin());
+    let swell = 0.6 + 0.4 * (t * 0.9).sin().abs();
     for (i, v) in out.iter_mut().enumerate() {
-        let t = i as f32 / rate;
-        *v += 0.25 * (tau * 1000.0 * t).sin();
-        *v += 0.35 * (tau * 50.0 * t).sin();
+        let s = i as f32 / rate;
+        *v *= swell;
+        *v += 0.25 * swell * (tau * sweep * s).sin();
+        *v += 0.35 * (tau * 50.0 * s).sin();
     }
     // Normalise to a realistic -6 dBFS peak. Summed tones otherwise pile up
     // well past full scale and the whole graph reads as a solid block.

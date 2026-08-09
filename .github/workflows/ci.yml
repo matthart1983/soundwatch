@@ -42,7 +42,7 @@ jobs:
 
       - name: Signature carries the Info.plist
         run: |
-          codesign -dvv target/release/soundwatch-lite 2>&1 | tee /tmp/sig
+          codesign -dvv target/release/soundwatch 2>&1 | tee /tmp/sig
           grep -q 'Identifier=com.soundwatch.lite' /tmp/sig \
             || { echo "::error::signature does not carry the bundle identifier"; exit 1; }
           grep -q 'Info.plist entries=' /tmp/sig \
@@ -53,10 +53,10 @@ jobs:
           for state in main paused filter detail help settings \
                        overview devices streams meters spectrum \
                        latency xruns routing timeline insights; do
-            ./target/release/soundwatch-lite --once "$state" --no-color > /dev/null
+            ./target/release/soundwatch --once "$state" --no-color > /dev/null
           done
-          ./target/release/soundwatch-lite --demo --once alert --no-color > /dev/null
+          ./target/release/soundwatch --demo --once alert --no-color > /dev/null
           # The spectrum fixture has to actually find the faults built into it.
-          ./target/release/soundwatch-lite --demo --once spectrum --no-color \
+          ./target/release/soundwatch --demo --once spectrum --no-color \
             | grep -q '50 Hz hum' \
             || { echo "::error::the demo spectrum did not detect its own hum"; exit 1; }

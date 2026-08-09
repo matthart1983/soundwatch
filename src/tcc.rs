@@ -40,6 +40,11 @@ use std::os::unix::ffi::OsStrExt;
 pub const DISCLAIM_ENV: &str = "SOUNDWATCH_TCC_DISCLAIMED";
 
 /// What `Info.plist` declares, and what a correctly signed binary reports back.
+///
+/// Still `.lite` after the binary was renamed, deliberately: TCC keys consent
+/// to this identifier, so changing it would silently revoke the audio-capture
+/// grant of everyone who had already given one, in exchange for a string almost
+/// nobody sees. It is not an oversight.
 pub const BUNDLE_ID: &str = "com.soundwatch.lite";
 
 const RTLD_DEFAULT: *mut c_void = -2isize as *mut c_void;

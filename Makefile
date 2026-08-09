@@ -21,7 +21,7 @@
 CARGO   ?= cargo
 SIGN_ID ?= -
 PREFIX  ?= /usr/local
-BIN     := soundwatch-lite
+BIN     := soundwatch
 
 RELEASE := target/release/$(BIN)
 DEBUG   := target/debug/$(BIN)

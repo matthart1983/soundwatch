@@ -69,11 +69,21 @@ pub fn truncate(s: &str, max: u16) -> &str {
     s
 }
 
-/// The glyph set. `⯈`/`⯇` (U+2BC8/U+2BC7) are the least universal characters in the
-/// spec, and `●` (U+25CF) is East-Asian-Ambiguous — it renders double-width under
-/// a fair number of terminal configurations, which would shift the DEVICE column
-/// on every input row and break the one contract the whole Lite family rests on.
-/// `--ascii` swaps the risky ones for guaranteed single-width stand-ins.
+/// The glyph set.
+///
+/// The handoff fixes the direction arrows as `⯈`/`⯇` (U+2BC8/U+2BC7) and calls
+/// them "the least universal characters in the spec", which turned out to be an
+/// understatement: they are absent from JetBrains Mono, and from every other
+/// common terminal font checked, so both arrows rendered as an empty box —
+/// visible in the first take of the demo recording. A glyph that is tofu
+/// everywhere is not a design, so these are `▸`/`◂` (U+25B8/U+25C2), which are
+/// the same shape at the same weight and actually exist.
+///
+/// `●` (U+25CF) and the new arrows are all East-Asian-Ambiguous: they render
+/// double-width under some terminal configurations, which would shift the
+/// DEVICE column on every input row and break the one contract the whole family
+/// rests on. `--ascii` swaps the risky ones for guaranteed single-width
+/// stand-ins.
 #[derive(Clone, Copy)]
 pub struct Glyphs {
     pub out: &'static str,
@@ -99,9 +109,9 @@ pub struct Glyphs {
 }
 
 pub const UNICODE: Glyphs = Glyphs {
-    // U+2BC8/U+2BC7 — black medium right/left-pointing triangle centred.
-    out: "\u{2BC8}",
-    inp: "\u{2BC7}",
+    // U+25B8/U+25C2 — black right/left-pointing small triangle.
+    out: "\u{25B8}",
+    inp: "\u{25C2}",
     dot: "\u{25CF}",
     paused: "\u{25C6}",
     cursor: "\u{2588}",
