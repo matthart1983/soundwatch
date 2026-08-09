@@ -40,13 +40,45 @@ const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
 
 #[link(name = "CoreAudio", kind = "framework")]
 unsafe extern "C" {
-    fn AudioHardwareCreateProcessTap(desc: *mut c_void, out_tap: *mut AudioObjectID) -> OSStatus;
-    fn AudioHardwareDestroyProcessTap(tap: AudioObjectID) -> OSStatus;
+    // Present since 10.x, so these are linked normally.
     fn AudioHardwareCreateAggregateDevice(
         desc: *const c_void,
         out_device: *mut AudioObjectID,
     ) -> OSStatus;
     fn AudioHardwareDestroyAggregateDevice(device: AudioObjectID) -> OSStatus;
+}
+
+// The process-tap API arrived in macOS 14.2, and these two are resolved at
+// runtime rather than linked.
+//
+// Linked normally they are undefined symbols that dyld must satisfy at launch,
+// so a binary built here simply *fails to start* on anything older — with a
+// "symbol not found" from the loader, before `main` runs and long before the
+// careful "needs macOS 14.2 or newer" message this module already contains
+// could be printed. That is invisible while developing on a current machine and
+// is exactly what a downloaded release would do to someone on Ventura.
+type CreateTapFn = unsafe extern "C" fn(*mut c_void, *mut AudioObjectID) -> OSStatus;
+type DestroyTapFn = unsafe extern "C" fn(AudioObjectID) -> OSStatus;
+
+const RTLD_DEFAULT: *mut c_void = -2isize as *mut c_void;
+
+unsafe extern "C" {
+    fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+}
+
+fn create_tap_fn() -> Option<CreateTapFn> {
+    let p = unsafe { dlsym(RTLD_DEFAULT, c"AudioHardwareCreateProcessTap".as_ptr()) };
+    (!p.is_null()).then(|| unsafe { std::mem::transmute::<*mut c_void, CreateTapFn>(p) })
+}
+
+fn destroy_tap_fn() -> Option<DestroyTapFn> {
+    let p = unsafe { dlsym(RTLD_DEFAULT, c"AudioHardwareDestroyProcessTap".as_ptr()) };
+    (!p.is_null()).then(|| unsafe { std::mem::transmute::<*mut c_void, DestroyTapFn>(p) })
+}
+
+/// Does this macOS have the process-tap API at all?
+pub fn tap_api_available() -> bool {
+    create_tap_fn().is_some()
 }
 
 #[link(name = "CoreFoundation", kind = "framework")]
@@ -125,10 +157,12 @@ impl LevelTap {
     /// Try to start metering system output. Returns a human-readable reason on
     /// failure so the UI can explain itself rather than just showing `--`.
     pub fn start() -> Result<Self, String> {
+        let create = create_tap_fn()
+            .ok_or("output metering needs macOS 14.2 or newer (no process-tap API)")?;
         let desc = Self::make_description()?;
 
         let mut tap: AudioObjectID = 0;
-        let st = unsafe { AudioHardwareCreateProcessTap(desc, &mut tap) };
+        let st = unsafe { create(desc, &mut tap) };
         unsafe {
             let _ = msg0(desc, sel(c"release"));
         }
@@ -290,9 +324,29 @@ impl Drop for LevelTap {
             if self.aggregate != 0 {
                 AudioHardwareDestroyAggregateDevice(self.aggregate);
             }
-            if self.tap != 0 {
-                AudioHardwareDestroyProcessTap(self.tap);
+            if self.tap != 0
+                && let Some(destroy) = destroy_tap_fn()
+            {
+                destroy(self.tap);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The process-tap symbols must not be load-time dependencies: linked
+    /// normally, the binary fails to start on macOS older than 14.2 with a
+    /// loader error, before any of this module's careful explanations can run.
+    #[test]
+    fn the_tap_api_is_resolved_at_runtime() {
+        // This machine has it, so the lookup must succeed here...
+        assert!(tap_api_available(), "the tap API should be present on a modern macOS");
+        // ...and a missing symbol must be a None rather than a link failure,
+        // which is what `dlsym` on a name that does not exist proves.
+        let missing = unsafe { dlsym(RTLD_DEFAULT, c"AudioHardwareNoSuchFunction".as_ptr()) };
+        assert!(missing.is_null());
     }
 }

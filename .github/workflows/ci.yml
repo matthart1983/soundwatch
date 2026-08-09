@@ -8,6 +8,12 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# A second push supersedes the first; there is no value in finishing a run for
+# a commit nobody will ever look at again.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   check:
     # macOS only, and it has to be a real one: several tests read the actual
@@ -20,6 +26,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+          targets: x86_64-apple-darwin
 
       - uses: Swatinem/rust-cache@v2
 
@@ -48,6 +55,12 @@ jobs:
           grep -q 'Info.plist entries=' /tmp/sig \
             || { echo "::error::Info.plist is not bound; TCC cannot prompt"; exit 1; }
 
+      # Releases ship an Intel build too, and the runners are all Apple
+      # Silicon. Compiling it here means a broken x86_64 build is a red CI run
+      # rather than something discovered while cutting a tag.
+      - name: Intel build
+        run: cargo build --release --target x86_64-apple-darwin
+
       - name: Renders without a terminal
         run: |
           for state in main paused filter detail help settings \
@@ -60,3 +73,26 @@ jobs:
           ./target/release/soundwatch --demo --once spectrum --no-color \
             | grep -q '50 Hz hum' \
             || { echo "::error::the demo spectrum did not detect its own hum"; exit 1; }
+
+      # The process-tap symbols are resolved with dlsym rather than linked, so
+      # the binary starts on macOS older than 14.2 and explains itself instead
+      # of dying in the loader. A hard link would make that a launch failure.
+      - name: Tap API is not a load-time dependency
+        run: |
+          if nm -u target/release/soundwatch | grep -q ProcessTap; then
+            echo "::error::process-tap symbols are linked; the binary will not start before macOS 14.2"
+            exit 1
+          fi
+
+  # The crate claims an MSRV. A claim nothing checks is a guess.
+  msrv:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+      - id: msrv
+        run: echo "v=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.v }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked

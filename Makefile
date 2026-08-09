@@ -26,7 +26,7 @@ BIN     := soundwatch
 RELEASE := target/release/$(BIN)
 DEBUG   := target/debug/$(BIN)
 
-.PHONY: all build debug run test check fmt lint sign install uninstall clean probe hooks
+.PHONY: all build debug run test check fmt lint sign install uninstall clean probe hooks dist
 
 all: build
 
@@ -76,6 +76,41 @@ check:
 	$(CARGO) fmt --check
 	$(CARGO) clippy --all-targets -- -D warnings
 	$(CARGO) test
+
+## dist — per-arch tarballs for a release, signed and verified
+##
+## The family ships prebuilt binaries and a Homebrew formula that points at
+## them, so the naming here matches: soundwatch-macos-<arch>.tar.gz containing
+## a binary called soundwatch-macos-<arch>.
+##
+## Signing is not optional and not cosmetic. An unsigned or linker-signed
+## binary does not carry its Info.plist into the code signature, so macOS has
+## nothing to prompt with and every meter reads silence — see src/tcc.rs. The
+## verify step below fails the build rather than shipping one.
+DIST    := dist
+TARGETS := aarch64-apple-darwin x86_64-apple-darwin
+
+dist:
+	@rm -rf $(DIST) && mkdir -p $(DIST)
+	@for target in $(TARGETS); do \
+	    case $$target in \
+	        aarch64-*) arch=aarch64 ;; \
+	        x86_64-*)  arch=x86_64 ;; \
+	    esac; \
+	    echo "==> $$target"; \
+	    $(CARGO) build --release --target $$target; \
+	    out="$(DIST)/$(BIN)-macos-$$arch"; \
+	    cp "target/$$target/release/$(BIN)" "$$out"; \
+	    codesign --force --sign "$(SIGN_ID)" "$$out"; \
+	    codesign -dvv "$$out" 2>&1 | grep -q 'Identifier=com.soundwatch.lite' \
+	        || { echo "ERROR: $$out lost its bundle identifier"; exit 1; }; \
+	    codesign -dvv "$$out" 2>&1 | grep -q 'Info.plist entries=' \
+	        || { echo "ERROR: $$out does not carry its Info.plist; TCC cannot prompt"; exit 1; }; \
+	    tar -C $(DIST) -czf "$$out.tar.gz" "$(BIN)-macos-$$arch"; \
+	    rm -f "$$out"; \
+	done
+	@cd $(DIST) && shasum -a 256 *.tar.gz | tee SHA256SUMS
+	@echo && ls -la $(DIST)
 
 ## install — signed release binary into $(PREFIX)/bin
 install: build

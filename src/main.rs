@@ -230,6 +230,14 @@ fn probe_tap(identity_error: Option<&str>) {
 
     println!("soundwatch tap probe\n");
     println!("signed as     : {}", tcc::signing_identifier().unwrap_or_else(|| "unsigned".into()));
+    println!(
+        "tap api       : {}",
+        if backend::tap::tap_api_available() {
+            "present"
+        } else {
+            "missing \u{2014} needs macOS 14.2 or newer"
+        }
+    );
     match identity_error {
         None if tcc::is_own_subject() => {
             println!("tcc subject   : this binary ({})", tcc::BUNDLE_ID)

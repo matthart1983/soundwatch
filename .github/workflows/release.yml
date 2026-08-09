@@ -1,0 +1,175 @@
+name: Release
+
+# Cutting a release is `git tag v0.1.0 && git push --tags`. Everything below is
+# `make dist` plus the paperwork, so a release built here is byte-for-byte the
+# same thing `make dist` produces on a laptop.
+on:
+  push:
+    tags: ["v*"]
+  # For re-running a release whose upload failed, without moving the tag.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build, e.g. v0.1.0"
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+
+      # A tag that disagrees with Cargo.toml ships a binary whose --version
+      # lies about which release it is. Cheaper to catch here than in an issue.
+      - name: Tag matches the crate version
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          crate=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "$tag" != "v$crate" ]; then
+            echo "::error::tag $tag does not match Cargo.toml version $crate"
+            exit 1
+          fi
+          echo "version=$crate" >> "$GITHUB_ENV"
+
+      # The full check, not just a build: a release is the worst place to find
+      # out the suite was red.
+      - name: Check
+        run: make check
+
+      - name: Build, sign and package
+        run: make dist
+
+      # `make dist` already fails if a binary lost its Info.plist, but the
+      # release is the one artefact nobody can re-verify later, so it is
+      # checked again on the thing actually being uploaded.
+      - name: Verify the packaged binaries
+        run: |
+          cd dist
+          for tgz in *.tar.gz; do
+            tar xzf "$tgz"
+          done
+          for bin in soundwatch-macos-*; do
+            case "$bin" in *.tar.gz|SHA256SUMS) continue ;; esac
+            echo "== $bin"
+            codesign -dvv "$bin" 2>&1 | grep -E '^(Identifier|Info.plist|Format)'
+            codesign -dvv "$bin" 2>&1 | grep -q 'Identifier=com.soundwatch.lite' \
+              || { echo "::error::$bin has no bundle identifier"; exit 1; }
+            codesign -dvv "$bin" 2>&1 | grep -q 'Info.plist entries=' \
+              || { echo "::error::$bin cannot obtain audio consent"; exit 1; }
+          done
+          # The native one has to actually run.
+          ./soundwatch-macos-aarch64 --version
+          ./soundwatch-macos-aarch64 --demo --once overview --no-color | head -3
+          rm -f soundwatch-macos-aarch64 soundwatch-macos-x86_64
+
+      - name: Release notes
+        run: |
+          {
+            echo "## Install"
+            echo
+            echo '```sh'
+            echo "brew install matthart1983/tap/soundwatch"
+            echo '```'
+            echo
+            echo "Or download a tarball below, then:"
+            echo
+            echo '```sh'
+            echo "tar xzf soundwatch-macos-aarch64.tar.gz"
+            echo "install -m 755 soundwatch-macos-aarch64 /usr/local/bin/soundwatch"
+            echo '```'
+            echo
+            echo "## Consent"
+            echo
+            echo "The first run asks for permission to record system audio."
+            echo "Without it the meters read silence — the tap is created, the"
+            echo "callback fires, and every sample is zero, with no error"
+            echo "anywhere. \`soundwatch --probe-tap\` says which of those you"
+            echo "are looking at."
+            echo
+            echo "macOS keys that grant to the binary's code signature, so a new"
+            echo "release asks again. That is expected."
+            echo
+            echo "Requires macOS 14.2 or newer for metering. Older versions run"
+            echo "and report everything else."
+            echo
+            echo "## Checksums"
+            echo
+            echo '```'
+            cat dist/SHA256SUMS
+            echo '```'
+          } > notes.md
+          cat notes.md
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          gh release create "$tag" \
+            --title "soundwatch $tag" \
+            --notes-file notes.md \
+            dist/soundwatch-macos-aarch64.tar.gz \
+            dist/soundwatch-macos-x86_64.tar.gz \
+            dist/SHA256SUMS \
+          || gh release upload "$tag" --clobber \
+            dist/soundwatch-macos-aarch64.tar.gz \
+            dist/soundwatch-macos-x86_64.tar.gz \
+            dist/SHA256SUMS
+
+      # The formula in the tap has to point at this release and carry its
+      # checksums. Printed rather than pushed: it edits another repository, and
+      # a release job with write access to a second repo is a bigger blast
+      # radius than this needs.
+      - name: Homebrew formula
+        run: |
+          sha_arm=$(awk '/aarch64/ {print $1}' dist/SHA256SUMS)
+          sha_x86=$(awk '/x86_64/  {print $1}' dist/SHA256SUMS)
+          v="${{ env.version }}"
+          cat <<EOF
+          ── Formula/soundwatch.rb ──────────────────────────────────────────
+          class Soundwatch < Formula
+            desc "Read-only audio diagnostics for macOS, in ten tabs"
+            homepage "https://github.com/matthart1983/soundwatch"
+            version "$v"
+            license "MIT"
+            depends_on macos: :ventura
+
+            on_macos do
+              on_arm do
+                url "https://github.com/matthart1983/soundwatch/releases/download/v$v/soundwatch-macos-aarch64.tar.gz"
+                sha256 "$sha_arm"
+
+                def install
+                  bin.install "soundwatch-macos-aarch64" => "soundwatch"
+                end
+              end
+              on_intel do
+                url "https://github.com/matthart1983/soundwatch/releases/download/v$v/soundwatch-macos-x86_64.tar.gz"
+                sha256 "$sha_x86"
+
+                def install
+                  bin.install "soundwatch-macos-x86_64" => "soundwatch"
+                end
+              end
+            end
+
+            test do
+              assert_match "soundwatch", shell_output("#{bin}/soundwatch --version")
+            end
+          end
+          ───────────────────────────────────────────────────────────────────
+          EOF

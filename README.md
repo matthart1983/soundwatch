@@ -42,13 +42,20 @@ what it means; Insights reads them for you and says which tab to open:
 
 ## Install
 
-Requires macOS 14.2 or newer (the process-tap API) and a Rust toolchain.
+**From source** — works today, and signs the binary correctly on your machine:
 
 ```sh
 git clone https://github.com/matthart1983/soundwatch
 cd soundwatch
-make install          # builds, signs, and installs to /usr/local/bin
+make install          # builds, signs, installs to /usr/local/bin
 soundwatch
+```
+
+**From a release** — prebuilt and signed for both architectures:
+
+```sh
+tar xzf soundwatch-macos-aarch64.tar.gz
+install -m 755 soundwatch-macos-aarch64 /usr/local/bin/soundwatch
 ```
 
 **Build with `make`, not `cargo build`.** Cargo alone produces a binary whose
@@ -59,11 +66,20 @@ which is the most interesting thing in this repository.
 make                  # release build, signed, ready to meter
 make run              # debug build, signed, run against the live audio stack
 make probe            # is metering actually receiving samples?
+make dist             # per-arch tarballs, signed and verified
 make check            # fmt, clippy -D warnings, tests
 make hooks            # refuse commits that fail any of the above
 
 soundwatch --demo     # the design fixtures — touches no audio device at all
 ```
+
+macOS 14.2+ for metering. Older versions run and report everything else: the
+process-tap symbols are resolved at runtime rather than linked, so the binary
+starts and explains itself instead of dying in the loader.
+
+Each release is signed with a different code hash, and macOS keys audio consent
+to the signature — so upgrading asks for permission again. That is expected, not
+a bug.
 
 ## Keys
 
