@@ -1,6 +1,6 @@
 [package]
 name = "soundwatch"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 # edition 2024 needs a recent toolchain; let-chains need 1.88.
 rust-version = "1.88"
