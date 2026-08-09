@@ -4,12 +4,67 @@
 
 use crate::model::{Caps, Snapshot};
 
+#[cfg(target_os = "macos")]
 pub mod coreaudio;
+#[cfg(target_os = "macos")]
 pub mod ffi;
+#[cfg(target_os = "macos")]
 pub mod input;
+#[cfg(target_os = "macos")]
 pub mod ioproc;
+pub mod level;
+#[cfg(target_os = "macos")]
 pub mod tap;
+
+#[cfg(target_os = "linux")]
+pub mod linux;
+
 pub mod worker;
+
+/// The backend for whatever this was built for.
+///
+/// The trait was written with the rest of the family in mind — the doc comment
+/// has said "PipeWire / PulseAudio / ALSA slot in behind the same interface"
+/// since the first commit — and this is that claim being cashed. `Caps` is what
+/// makes it work: the UI asks what the backend can actually report and renders
+/// `--` plus one explanatory line for the rest, so a backend that knows less
+/// produces a smaller screen rather than a wrong one.
+pub fn open(metering: Metering) -> Box<dyn AudioBackend> {
+    #[cfg(target_os = "macos")]
+    {
+        Box::new(coreaudio::CoreAudio::new(metering))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        Box::new(linux::Alsa::new(metering))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = metering;
+        Box::new(Unsupported)
+    }
+}
+
+/// A backend for a platform nobody has written one for. It reports nothing and
+/// says so, which is better than not compiling.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub struct Unsupported;
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+impl AudioBackend for Unsupported {
+    fn name(&self) -> &'static str {
+        "none"
+    }
+    fn caps(&self) -> Caps {
+        Caps { note: Some("no audio backend for this platform".into()), ..Default::default() }
+    }
+    fn snapshot(&mut self) -> Snapshot {
+        Snapshot::starting("none", String::new())
+    }
+    fn levels(&mut self) -> Levels {
+        Levels::default()
+    }
+}
 
 /// A single level sample, taken at the sampler's rate (~20 Hz) rather than the
 /// state tick's rate (1 Hz).
@@ -53,7 +108,10 @@ pub struct Metering {
 }
 
 impl Metering {
-    /// Neither meter: enumerate and read properties only.
+    /// Neither meter: enumerate and read properties only. Used by `--demo`,
+    /// `--once` and the hardware tests, which differ by platform — so on a
+    /// build whose backend has no such tests it looks unused.
+    #[allow(dead_code)]
     pub const OBSERVE_ONLY: Self = Self { output: false, input: false };
 
     pub fn any(self) -> bool {

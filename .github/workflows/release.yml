@@ -20,7 +20,59 @@ permissions:
   contents: write
 
 jobs:
+  # Built on its own runner rather than cross-compiled: the Linux build is
+  # dynamically linked against glibc (see the dist-linux comment in the
+  # Makefile for why it cannot be static), so it has to be linked against an
+  # old enough one, and the only honest way to know that is to build there.
+  #
+  # Built inside a Debian 12 container rather than on the runner directly. A
+  # dynamically linked binary cannot run against a glibc older than the one it
+  # was built against, so the build image *is* the compatibility floor, and
+  # pinning it here states that floor instead of inheriting whatever the
+  # current runner image happens to be — which changes without warning and gets
+  # retired on GitHub's schedule, not this project's. Bookworm's glibc 2.36
+  # covers Debian 12, Ubuntu 22.04 and RHEL 9 upward; the verify step below
+  # prints the floor actually demanded, so a bump is visible in the log rather
+  # than in a bug report.
+  linux:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    container: rust:1-bookworm
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build and package
+        run: make dist-linux
+
+      - name: Verify the packaged binary
+        run: |
+          cd dist
+          tar xzf soundwatch-linux-${{ matrix.arch }}.tar.gz
+          ./soundwatch-linux-${{ matrix.arch }} --version
+          ./soundwatch-linux-${{ matrix.arch }} --demo --once overview --no-color | head -3
+          # The oldest glibc this binary demands. Recorded in the log so that a
+          # "GLIBC_2.xx not found" report has something to be compared against.
+          objdump -T soundwatch-linux-${{ matrix.arch }} \
+            | grep -oE 'GLIBC_[0-9.]+' | sort -Vu | tail -1
+          rm -f soundwatch-linux-${{ matrix.arch }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: dist/soundwatch-linux-${{ matrix.arch }}.tar.gz
+
   release:
+    needs: linux
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v5
@@ -76,6 +128,17 @@ jobs:
           ./soundwatch-macos-aarch64 --demo --once overview --no-color | head -3
           rm -f soundwatch-macos-aarch64 soundwatch-macos-x86_64
 
+      # The Linux tarballs were built on their own runners; they join the macOS
+      # ones here so a single SHA256SUMS covers everything in the release.
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: linux-*
+          path: dist
+          merge-multiple: true
+
+      - name: Checksum everything
+        run: cd dist && shasum -a 256 *.tar.gz | tee SHA256SUMS
+
       - name: Release notes
         run: |
           {
@@ -91,6 +154,17 @@ jobs:
             echo "tar xzf soundwatch-macos-aarch64.tar.gz"
             echo "install -m 755 soundwatch-macos-aarch64 /usr/local/bin/soundwatch"
             echo '```'
+            echo
+            echo "## Linux"
+            echo
+            echo "Devices, streams, latency and xruns come from \`/proc/asound\`"
+            echo "and need nothing installed. The level meters open the default"
+            echo "monitor source through libpulse, which is loaded at runtime —"
+            echo "on a machine without it everything else still works and the"
+            echo "meters say so. \`soundwatch --probe-tap\` reports which."
+            echo
+            echo "Streams are ALSA device holders. Under PipeWire or PulseAudio"
+            echo "that is one entry for the sound server, not one per app."
             echo
             echo "## Consent"
             echo
@@ -122,13 +196,9 @@ jobs:
           gh release create "$tag" \
             --title "soundwatch $tag" \
             --notes-file notes.md \
-            dist/soundwatch-macos-aarch64.tar.gz \
-            dist/soundwatch-macos-x86_64.tar.gz \
-            dist/SHA256SUMS \
+            dist/*.tar.gz dist/SHA256SUMS \
           || gh release upload "$tag" --clobber \
-            dist/soundwatch-macos-aarch64.tar.gz \
-            dist/soundwatch-macos-x86_64.tar.gz \
-            dist/SHA256SUMS
+            dist/*.tar.gz dist/SHA256SUMS
 
       # The formula in the tap has to point at this release and carry its
       # checksums. Printed rather than pushed: it edits another repository, and
@@ -142,7 +212,7 @@ jobs:
           cat <<EOF
           ── Formula/soundwatch.rb ──────────────────────────────────────────
           class Soundwatch < Formula
-            desc "Read-only audio diagnostics for macOS, in ten tabs"
+            desc "Read-only audio diagnostics for macOS and Linux, in ten tabs"
             homepage "https://github.com/matthart1983/soundwatch"
             version "$v"
             license "MIT"

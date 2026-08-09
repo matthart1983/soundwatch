@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 # edition 2024 needs a recent toolchain; let-chains need 1.88.
 rust-version = "1.88"
-description = "SoundWatch — read-only audio diagnostics for macOS, in ten tabs."
+description = "SoundWatch — read-only audio diagnostics for macOS and Linux, in ten tabs."
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/matthart1983/soundwatch"
@@ -24,9 +24,11 @@ crossterm = "0.29.0"
 ratatui = "0.30.2"
 unicode-width = "0.2.2"
 
-[target.'cfg(target_os = "macos")'.dependencies]
-# posix_spawn and dlsym, for the TCC re-exec in src/tcc.rs. Already in the tree
-# under crossterm; taking it directly keeps that FFI honestly typed.
+[target.'cfg(unix)'.dependencies]
+# posix_spawn and dlsym for the TCC re-exec (macOS, src/tcc.rs), and dlopen for
+# the optional libpulse level meters (Linux, src/backend/linux/pulse.rs).
+# Already in the tree under crossterm; taking it directly keeps that FFI
+# honestly typed.
 libc = "0.2"
 
 [profile.release]

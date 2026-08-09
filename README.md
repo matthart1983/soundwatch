@@ -1,6 +1,6 @@
 # SoundWatch
 
-**Read-only audio diagnostics for macOS, in ten tabs.** One question:
+**Read-only audio diagnostics for macOS and Linux, in ten tabs.** One question:
 *why does my audio sound wrong?*
 
 ![SoundWatch](docs/media/demo.gif)
@@ -51,22 +51,25 @@ make install          # builds, signs, installs to /usr/local/bin
 soundwatch
 ```
 
-**From a release** — prebuilt and signed for both architectures:
+**From a release** — prebuilt, and signed on macOS:
 
 ```sh
-tar xzf soundwatch-macos-aarch64.tar.gz
+tar xzf soundwatch-macos-aarch64.tar.gz      # or soundwatch-linux-x86_64.tar.gz
 install -m 755 soundwatch-macos-aarch64 /usr/local/bin/soundwatch
 ```
 
-**Build with `make`, not `cargo build`.** Cargo alone produces a binary whose
-meters can never read anything — see [Consent](#consent-and-why-there-is-a-makefile),
-which is the most interesting thing in this repository.
+**On macOS, build with `make`, not `cargo build`.** Cargo alone produces a binary
+whose meters can never read anything — see [Consent](#consent-and-why-there-is-a-makefile),
+which is the most interesting thing in this repository. On Linux there is nothing
+to sign and `cargo build --release` is equivalent; `make` still works and the
+signing step is a no-op.
 
 ```sh
 make                  # release build, signed, ready to meter
 make run              # debug build, signed, run against the live audio stack
 make probe            # is metering actually receiving samples?
-make dist             # per-arch tarballs, signed and verified
+make dist             # per-arch macOS tarballs, signed and verified
+make dist-linux       # one tarball for the host architecture
 make check            # fmt, clippy -D warnings, tests
 make hooks            # refuse commits that fail any of the above
 
@@ -80,6 +83,11 @@ starts and explains itself instead of dying in the loader.
 Each release is signed with a different code hash, and macOS keys audio consent
 to the signature — so upgrading asks for permission again. That is expected, not
 a bug.
+
+On Linux, everything except the meters needs nothing installed at all. The meters
+need libpulse, which is opened at runtime for the same reason — a machine without
+a sound server still runs the tool and says which part is missing rather than
+failing to start.
 
 ## Keys
 
@@ -294,10 +302,14 @@ way audio capture does, and is detected the same way: a capture stream that read
 
 ## Platform support
 
-macOS only today, behind an `AudioBackend` trait sized for the rest of the family
-(PipeWire, PulseAudio, bare ALSA, JACK). A `Caps` struct declares what the active
+Two backends behind an `AudioBackend` trait: CoreAudio on macOS, ALSA plus an
+optional libpulse meter on Linux. A `Caps` struct declares what the active
 backend can actually report; the UI renders `--` plus one explanatory line for
-anything unavailable and never shifts the layout.
+anything unavailable, and never shifts the layout to hide a gap. The trait is
+sized for the rest of the family — JACK and a native PipeWire backend fit the
+same shape.
+
+### macOS
 
 **What works:** output levels, input levels with `--meter-input`, device names,
 sample rate, bit depth, channel count, buffer frame size, computed latency
@@ -317,6 +329,43 @@ CoreAudio bindings are hand-rolled in `src/backend/ffi.rs` rather than pulled fr
 `coreaudio-sys`, which would drag bindgen and libclang into the build and whose
 generated bindings predate the process-object API. Every selector was read out of
 the SDK headers.
+
+### Linux
+
+Devices, formats, latency and xruns are read from `/proc/asound` — no library, no
+daemon, no permissions beyond being able to read `/proc`. Levels are separate:
+they open the default monitor source through `libpulse-simple`, which is loaded
+with `dlopen` at first use rather than linked. That is the whole reason the tool
+still starts on a headless box with no sound server, and it is checked in CI —
+if `libpulse` ever becomes a load-time dependency, the build fails.
+
+**What works:** output levels, input levels with `--meter-input`, card and PCM
+names, driver-derived transport (HDA, USB, HDMI, Bluetooth…), sample rate, format
+and bit depth, channel count, buffer and period size, latency computed from them,
+running state, xrun counts, and which process is holding each device.
+
+**What does not: per-application streams.** `/proc/asound` names the process
+holding the card, and under PipeWire or PulseAudio that is the sound server for
+every application on the machine — so the Streams tab shows one entry for
+`pipewire`, not one per app, and says so in the caps note. Per-app streams need
+to talk to the sound server itself, which is a native PipeWire or PulseAudio
+backend rather than an addition to this one.
+
+Levels come from the default monitor, so they are what the machine is playing in
+total, not per device. A card that is not the default sink meters as silence,
+which is correct and indistinguishable from a card playing nothing —
+`soundwatch --probe-tap` reports which of those you are looking at:
+
+```
+soundwatch level probe
+
+output monitor: peak -1.9 dBFS · working
+input         : peak -120.0 dBFS · every sample is zero — is anything playing to it?
+```
+
+Verified against real hardware (Intel HDA, HDMI, PipeWire) rather than only
+against fixtures; the `/proc` parser tests use captures taken verbatim from that
+machine.
 
 ## Where this departs from the spec
 

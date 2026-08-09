@@ -84,6 +84,60 @@ jobs:
             exit 1
           fi
 
+  # Linux is a second first-class backend, not a build that happens to compile.
+  # It reads ALSA through /proc/asound and meters through libpulse, and both of
+  # those are absent or lying on a CI runner, so what is checked here is the
+  # part that does not need hardware: that the tree builds and lints clean for
+  # the target, that the /proc parsers still agree with the fixtures captured
+  # from a real machine, and that the binary runs on a box with no sound at all
+  # instead of dying — which is the state most servers are in.
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test
+
+      - name: Build
+        run: make build
+
+      - name: Renders without a terminal
+        run: |
+          for state in main paused filter detail help settings \
+                       overview devices streams meters spectrum \
+                       latency xruns routing timeline insights; do
+            ./target/release/soundwatch --once "$state" --no-color > /dev/null
+          done
+          ./target/release/soundwatch --demo --once alert --no-color > /dev/null
+          ./target/release/soundwatch --demo --once spectrum --no-color \
+            | grep -q '50 Hz hum' \
+            || { echo "::error::the demo spectrum did not detect its own hum"; exit 1; }
+
+      # The whole point of loading libpulse with dlopen is that a machine
+      # without it still runs everything except the meters. A runner is exactly
+      # that machine, so the probe must report the meters as unavailable and
+      # still exit 0 rather than fail to start.
+      - name: Survives a machine with no sound server
+        run: |
+          if ldd target/release/soundwatch | grep -q libpulse; then
+            echo "::error::libpulse is linked; the binary will not start without it"
+            exit 1
+          fi
+          ./target/release/soundwatch --probe-tap
+
   # The crate claims an MSRV. A claim nothing checks is a guess.
   msrv:
     runs-on: macos-15

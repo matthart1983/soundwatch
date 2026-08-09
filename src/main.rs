@@ -1,4 +1,4 @@
-//! SoundWatch — read-only audio diagnostics for macOS, in ten tabs.
+//! SoundWatch — read-only audio diagnostics for macOS and Linux, in ten tabs.
 //!
 //! Read-only throughout: no volume, mute, routing or default changes, and
 //! nothing is ever written back to the audio system. `--lite` is the original
@@ -27,6 +27,7 @@ mod meter;
 mod model;
 mod spectrum;
 mod tabs;
+#[cfg(target_os = "macos")]
 mod tcc;
 mod theme;
 mod ui;
@@ -46,11 +47,11 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier};
 
 use app::App;
+#[allow(unused_imports)]
 use backend::AudioBackend;
-use backend::coreaudio::CoreAudio;
 
 const USAGE: &str = "\
-soundwatch — read-only audio diagnostics for macOS, in ten tabs
+soundwatch — read-only audio diagnostics for macOS and Linux, in ten tabs
 
 USAGE:
     soundwatch [OPTIONS]
@@ -74,9 +75,11 @@ OPTIONS:
                       any tab by name: overview, devices, streams, meters,
                       spectrum, latency, xruns, routing, timeline, insights
     --no-color        with --once, emit plain text
-    --probe-tap       start the output tap, watch it for five seconds, and
-                      report whether real samples arrive. Use this first when
-                      the meters look flat.
+    --probe-tap       open the meters, watch them, and report whether real
+                      samples arrive (the process tap on macOS, the monitor
+                      source on Linux). Use this first when the meters look
+                      flat: a path that opens cleanly and delivers nothing but
+                      zeros looks exactly like a quiet machine.
     --defaults        ignore the saved settings for this run
     --lite            the original single screen instead of the ten tabs
 
@@ -150,14 +153,17 @@ fn main() {
         }
     };
 
-    // Metering needs consent, and consent needs us to answer for ourselves
-    // rather than for whichever terminal launched us. On success this call
-    // replaces the process image and never returns; on failure we carry on and
-    // the backend reports metering as unavailable, with the reason on screen.
-    //
-    // --demo and --once never meter, so they never ask.
+    // --demo and --once never meter, so they never ask for anything.
     let wants_metering = !args.demo && args.once.is_none();
-    let mut identity_error = None;
+
+    // Metering needs consent, and on macOS consent needs us to answer for
+    // ourselves rather than for whichever terminal launched us. On success this
+    // call replaces the process image and never returns; on failure we carry on
+    // and the backend reports metering as unavailable, with the reason on
+    // screen. Nothing to disclaim anywhere else.
+    #[allow(unused_mut)]
+    let mut identity_error: Option<String> = None;
+    #[cfg(target_os = "macos")]
     if wants_metering && !tcc::is_own_subject() {
         // Irrefutable: the success arm of adopt_own_identity() never returns.
         let Err(e) = tcc::adopt_own_identity();
@@ -165,7 +171,18 @@ fn main() {
     }
 
     if args.probe {
+        #[cfg(target_os = "macos")]
         probe_tap(identity_error.as_deref());
+        #[cfg(target_os = "linux")]
+        {
+            let _ = identity_error;
+            probe_monitor();
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            let _ = identity_error;
+            println!("no audio backend for this platform, so nothing to probe.");
+        }
         return;
     }
 
@@ -189,22 +206,72 @@ fn main() {
     // --once is a one-shot render, so it reads the backend synchronously: there
     // is no UI to keep responsive and no second frame to wait for.
     if let Some(state) = args.once {
-        let mut be = CoreAudio::new(metering);
+        let mut be = backend::open(metering);
         let mut app = App::snapshot_only(be.snapshot(), args.cfg);
         return once(&mut app, &state, args.color);
     }
 
     // Live: the backend goes on its own thread and the UI never touches
     // CoreAudio. See backend::worker for what happens when it does.
-    let be = CoreAudio::new(metering);
+    let be = backend::open(metering);
     let name = be.name();
-    let host = backend::ffi::hostname();
-    let mut app =
-        App::live(backend::worker::BackendWorker::spawn(Box::new(be)), name, host, args.cfg);
+    let host = hostname();
+    let mut app = App::live(backend::worker::BackendWorker::spawn(be), name, host, args.cfg);
 
     if let Err(e) = run(&mut app) {
         eprintln!("soundwatch: {e}");
         std::process::exit(1);
+    }
+}
+
+/// The Linux counterpart of the tap probe.
+///
+/// Same failure to diagnose: a monitor source that opens cleanly and delivers
+/// nothing but zeros is indistinguishable from a quiet machine, and on Linux
+/// the usual cause is that the default sink has no monitor — or that there is
+/// no sound server running at all behind the libpulse shim.
+#[cfg(target_os = "linux")]
+fn probe_monitor() {
+    use backend::linux::pulse::{Monitor, Which};
+
+    println!("soundwatch level probe\n");
+    for (label, which) in [("output monitor", Which::Output), ("input", Which::Input)] {
+        match Monitor::open(which) {
+            Err(e) => println!("{label:14}: unavailable \u{2014} {e}"),
+            Ok(m) => {
+                let mut best = f32::NEG_INFINITY;
+                for _ in 0..30 {
+                    std::thread::sleep(Duration::from_millis(100));
+                    if let Some(d) = m.peak_dbfs()
+                        && d > best
+                    {
+                        best = d;
+                    }
+                }
+                let verdict = if !m.has_ever_heard_signal() {
+                    "every sample is zero \u{2014} is anything playing to it?"
+                } else {
+                    "working"
+                };
+                println!("{label:14}: peak {best:.1} dBFS \u{b7} {verdict}");
+            }
+        }
+    }
+}
+
+/// The machine's short name, for the header.
+fn hostname() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        backend::ffi::hostname()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        std::fs::read_to_string("/etc/hostname")
+            .ok()
+            .map(|s| s.trim().split('.').next().unwrap_or("localhost").to_owned())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "localhost".into())
     }
 }
 
@@ -225,6 +292,7 @@ fn once(app: &mut App, state: &str, color: bool) {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn probe_tap(identity_error: Option<&str>) {
     use backend::tap::LevelTap;
 

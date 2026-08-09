@@ -22,11 +22,12 @@ CARGO   ?= cargo
 SIGN_ID ?= -
 PREFIX  ?= /usr/local
 BIN     := soundwatch
+UNAME   := $(shell uname -s)
 
 RELEASE := target/release/$(BIN)
 DEBUG   := target/debug/$(BIN)
 
-.PHONY: all build debug run test check fmt lint sign install uninstall clean probe hooks dist
+.PHONY: all build debug run test check fmt lint sign install uninstall clean probe hooks dist dist-linux
 
 all: build
 
@@ -45,14 +46,21 @@ run: debug
 	@$(DEBUG)
 
 ## probe — is metering actually receiving samples?
+## (the tap on macOS, the monitor source on Linux; same question either way)
 probe: debug
 	@$(DEBUG) --probe-tap
 
 ## sign — bind Info.plist into the code signature (BIN_PATH=...)
+##
+## A no-op off macOS: there is no TCC to satisfy and no codesign to run with.
+## Linux gates audio access on group membership and the sound server, both of
+## which are settled long before this binary exists.
 sign:
 	@test -n "$(BIN_PATH)" || { echo "sign: set BIN_PATH"; exit 2; }
+ifeq ($(UNAME),Darwin)
 	@codesign --force --sign "$(SIGN_ID)" "$(BIN_PATH)"
 	@codesign -dvv "$(BIN_PATH)" 2>&1 | grep -E '^(Identifier|Info.plist)' | sed 's/^/  /'
+endif
 
 ## test — the full suite, including tests that read real hardware
 test:
@@ -80,13 +88,13 @@ check:
 ## dist — per-arch tarballs for a release, signed and verified
 ##
 ## The family ships prebuilt binaries and a Homebrew formula that points at
-## them, so the naming here matches: soundwatch-macos-<arch>.tar.gz containing
-## a binary called soundwatch-macos-<arch>.
+## them, so the naming here matches: soundwatch-<os>-<arch>.tar.gz containing a
+## binary of the same name.
 ##
-## Signing is not optional and not cosmetic. An unsigned or linker-signed
-## binary does not carry its Info.plist into the code signature, so macOS has
-## nothing to prompt with and every meter reads silence — see src/tcc.rs. The
-## verify step below fails the build rather than shipping one.
+## On macOS, signing is not optional and not cosmetic. An unsigned or
+## linker-signed binary does not carry its Info.plist into the code signature,
+## so macOS has nothing to prompt with and every meter reads silence — see
+## src/tcc.rs. The verify step below fails the build rather than shipping one.
 DIST    := dist
 TARGETS := aarch64-apple-darwin x86_64-apple-darwin
 
@@ -110,6 +118,31 @@ dist:
 	    rm -f "$$out"; \
 	done
 	@cd $(DIST) && shasum -a 256 *.tar.gz | tee SHA256SUMS
+	@echo && ls -la $(DIST)
+
+## dist-linux — one tarball for the host architecture
+##
+## Deliberately dynamically linked against glibc rather than a static musl
+## build, which is what the rest of the family ships. The level meters reach
+## libpulse through dlopen at runtime (src/backend/linux/pulse.rs) so that the
+## binary still runs on a machine with no sound server at all — and dlopen in a
+## statically linked binary either fails outright or loads a second libc beside
+## the one already in the process. Everything except the meters works without
+## libpulse, so the runtime lookup is the feature, and it costs a glibc floor.
+##
+## Built on the oldest glibc you can reasonably find; there is no cross-arch
+## loop here because a Linux release is built on a runner per architecture.
+dist-linux:
+	@mkdir -p $(DIST)
+	@arch=$$(uname -m); \
+	    echo "==> linux-$$arch"; \
+	    $(CARGO) build --release; \
+	    out="$(DIST)/$(BIN)-linux-$$arch"; \
+	    cp "$(RELEASE)" "$$out"; \
+	    "$$out" --version >/dev/null || { echo "ERROR: $$out does not run"; exit 1; }; \
+	    tar -C $(DIST) -czf "$$out.tar.gz" "$(BIN)-linux-$$arch"; \
+	    rm -f "$$out"
+	@cd $(DIST) && sha256sum *.tar.gz | tee SHA256SUMS
 	@echo && ls -la $(DIST)
 
 ## install — signed release binary into $(PREFIX)/bin

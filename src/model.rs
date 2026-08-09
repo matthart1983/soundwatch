@@ -46,6 +46,10 @@ pub struct Format {
 /// How a device is attached. Bluetooth is the one that matters most: it is the
 /// usual answer to "why does this sound like that", and no other column on any
 /// screen would tell you.
+// Several of these only ever come from one platform's driver names, so a
+// single-platform build sees the others as dead. They are not; they are the
+// other platform's.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Transport {
     #[default]
