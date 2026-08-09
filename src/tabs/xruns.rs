@@ -73,7 +73,7 @@ pub fn draw(c: &mut Canvas, l: &Layout, app: &App) {
 
     let rows = (l.body_top + l.body_rows).saturating_sub(y) as usize;
     // Newest first: the one you are chasing is the one that just happened.
-    for (i, e) in app.snap.xrun_log.iter().rev().take(rows).enumerate() {
+    for (i, e) in app.snap.xrun_log.iter().rev().skip(app.scroll).take(rows).enumerate() {
         let row = y + i as u16;
         c.right(f_when, row, &ago(app, e), theme::DIM);
         let fg = if e.count >= app.cfg.xrun_alert { theme::RED } else { theme::YELLOW };

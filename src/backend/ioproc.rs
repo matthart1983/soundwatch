@@ -150,6 +150,10 @@ impl MeterState {
         // Seqlock read: a pair taken while the writer was mid-update is
         // discarded rather than used. Bounded, because the caller is a 20 Hz
         // sampler and a missed frame is a missed frame, not a stall.
+        // The mirror of the writer's barrier: an *acquire load* on the second
+        // read orders what comes after it, not the data loads that came
+        // before, so those could be satisfied after the validation and defeat
+        // the check. The fence goes between the data and the re-read.
         let mut pair = None;
         for _ in 0..8 {
             let before = self.rms_seq.load(Ordering::Acquire);
@@ -158,7 +162,8 @@ impl MeterState {
             }
             let sum = f64::from_bits(self.sum_sq.load(Ordering::Relaxed));
             let n = self.sum_n.load(Ordering::Relaxed);
-            if self.rms_seq.load(Ordering::Acquire) == before {
+            std::sync::atomic::fence(Ordering::Acquire);
+            if self.rms_seq.load(Ordering::Relaxed) == before {
                 pair = Some((sum, n));
                 break;
             }
@@ -224,6 +229,9 @@ impl MeterState {
 /// or taken modulo, the one division is guarded), and `catch_unwind` is a
 /// backstop for the edit that overlooks that. It costs nothing when nothing
 /// panics.
+///
+/// It is also only a backstop if panics *unwind*, which is why the release
+/// profile no longer sets `panic = "abort"` — see `Cargo.toml`.
 extern "C" fn peak_io_proc(
     device: AudioObjectID,
     now: *const AudioTimeStamp,
@@ -349,10 +357,19 @@ fn peak_io_proc_inner(
     // measurement each time depending on the buffer size.
     if sample_count > 0 {
         // Seqlock write: odd while the pair is inconsistent, even when it is
-        // publishable again. Two stores and two adds — no loop, no blocking,
-        // which is the only acceptable shape on this thread.
+        // publishable again. No loop and no blocking, which is the only
+        // acceptable shape on this thread.
+        //
+        // The fence is load-bearing and easy to get wrong. A *release store*
+        // on the odd marker orders everything before it, and does nothing to
+        // stop the data stores after it from becoming visible first — which on
+        // arm64 they can. A reader would then see an even sequence either side
+        // of a sum that already includes a block whose count is still missing:
+        // the exact torn pair this whole mechanism exists to prevent, just far
+        // rarer. The barrier has to sit *between* the marker and the data.
         let seq = state.rms_seq.load(Ordering::Relaxed);
-        state.rms_seq.store(seq.wrapping_add(1), Ordering::Release);
+        state.rms_seq.store(seq.wrapping_add(1), Ordering::Relaxed);
+        std::sync::atomic::fence(Ordering::Release);
         let prev = f64::from_bits(state.sum_sq.load(Ordering::Relaxed));
         state.sum_sq.store((prev + sum_sq).to_bits(), Ordering::Relaxed);
         state.sum_n.store(
@@ -600,6 +617,48 @@ mod tests {
         assert!((db + 3.01).abs() < 0.05, "full-scale sine RMS read {db} dBFS");
         // Reading clears, so there is nothing to double-count.
         assert_eq!(m.rms_dbfs(), None, "rms did not clear on read");
+    }
+
+    /// The guard on the callbacks is only a guard if panics unwind. Under
+    /// `panic = "abort"` — which the release profile used to set — `catch_unwind`
+    /// is never reached, so the shipped binary still died on a panic in a
+    /// CoreAudio callback while the code claimed otherwise.
+    #[test]
+    fn a_panicking_callback_does_not_kill_the_process() {
+        let caught = std::panic::catch_unwind(|| panic!("as a callback would"));
+        assert!(caught.is_err(), "panics are not unwinding: catch_unwind is inert here");
+    }
+
+    /// The *writer's* NaN guard, which the reader-side test does not reach: a
+    /// non-finite sample must never enter the accumulator in the first place.
+    #[test]
+    fn a_non_finite_sample_is_refused_by_the_callback() {
+        let state = std::sync::Arc::new(MeterState::default());
+        let mut samples = vec![0.5f32; 64];
+        samples[7] = f32::NAN;
+        samples[9] = f32::INFINITY;
+        let mut buffers = AudioBufferListRaw {
+            number_buffers: 1,
+            buffers: [AudioBufferRaw {
+                number_channels: 1,
+                data_byte_size: (samples.len() * size_of::<f32>()) as u32,
+                data: samples.as_mut_ptr() as *mut c_void,
+            }],
+        };
+        peak_io_proc_inner(
+            0,
+            std::ptr::null(),
+            &buffers,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            std::sync::Arc::as_ptr(&state) as *mut c_void,
+        );
+        let _ = &mut buffers;
+        let db = state.take_rms_dbfs().expect("a reading");
+        assert!(db.is_finite(), "a NaN sample reached the accumulator: {db}");
+        // 62 of 64 samples at half scale, two skipped: still about -6 dBFS.
+        assert!((db + 6.1).abs() < 0.5, "read {db} dBFS");
     }
 
     #[test]

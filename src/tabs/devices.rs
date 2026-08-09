@@ -53,10 +53,13 @@ pub fn draw(c: &mut Canvas, l: &Layout, app: &App) {
         return;
     }
 
-    let rows = l.body_rows.saturating_sub(2) as usize;
-    for (i, d) in app.snap.devices.iter().take(rows).enumerate() {
+    // Windowed on `app.scroll`, which `clamp_selection` keeps the selection
+    // inside. Drawing a fixed first-N window while the selection moved past it
+    // left the highlight invisible and the list frozen.
+    let rows = app.list_rows();
+    for (i, d) in app.snap.devices.iter().skip(app.scroll).take(rows).enumerate() {
         let y = top + 2 + i as u16;
-        let selected = i == app.sel.min(app.snap.devices.len() - 1);
+        let selected = app.scroll + i == app.sel;
         if selected {
             c.tint(l.content, y, theme::SEL_BG);
         }
@@ -110,8 +113,9 @@ pub fn draw(c: &mut Canvas, l: &Layout, app: &App) {
     }
 
     if app.snap.devices.len() > rows {
-        let more = app.snap.devices.len() - rows;
-        c.right(l.content, l.body_top + l.body_rows - 1, &format!("+{more} more"), theme::FAINT);
+        let last = (app.scroll + rows).min(app.snap.devices.len());
+        let range = format!("{}-{} of {}", app.scroll + 1, last, app.snap.devices.len());
+        c.right(l.content, l.body_top + l.body_rows - 1, &range, theme::FAINT);
     }
 }
 

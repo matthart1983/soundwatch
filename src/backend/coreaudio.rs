@@ -154,12 +154,17 @@ pub struct CoreAudio {
     events: VecDeque<SessionEvent>,
     /// Previous tick's world, for diffing into events.
     ///
-    /// Keyed by `(name, direction)`, not by name: `snapshot` emits one entry
-    /// per (device, direction), so a duplex interface appears twice under one
-    /// name. Keyed by name alone the two halves overwrite each other and then
-    /// compare against each other's format every tick — which reported a
-    /// format change, once per second, from a value to itself.
-    prev_devices: Vec<((String, bool), Format)>,
+    /// Keyed by `(id, direction)` and carrying the name only to display.
+    ///
+    /// `snapshot` emits one entry per (device, direction), so a duplex
+    /// interface appears twice. Keyed by name alone the two halves overwrote
+    /// each other and compared against each other's format every tick,
+    /// reporting a change from a value to itself once a second. Keying by
+    /// `(name, direction)` fixed the common case and left the same failure for
+    /// two devices *sharing* a name — two identical USB interfaces, or an
+    /// aggregate wrapping a device under its own name — where it also
+    /// suppressed genuine add and remove events. The id is the identity.
+    prev_devices: Vec<((AudioObjectID, bool), String, Format)>,
     prev_default_out: Option<String>,
     prev_default_in: Option<String>,
     prev_streams: HashSet<String>,
@@ -384,28 +389,16 @@ impl CoreAudio {
         } else {
             // Collected before logging: `log` takes &mut self and the diff
             // borrows the previous state immutably.
-            // Collected before logging: `log` takes &mut self and the diff
-            // borrows the previous state immutably.
-            //
-            // Keyed by (name, direction). `snapshot` emits one entry per
-            // (device, direction), so a duplex interface appears twice under
-            // one name; keyed by name alone the two halves overwrite each other
-            // and then compare against each other's format every tick, which
-            // reported a format change — from a value to itself — once a second
-            // for as long as the tool was open.
-            let prev: HashMap<(String, bool), Format> =
-                self.prev_devices.iter().map(|(k, f)| (k.clone(), *f)).collect();
-            let known: HashSet<&str> = prev.keys().map(|(n, _)| n.as_str()).collect();
+            let prev: HashMap<(AudioObjectID, bool), (&str, Format)> =
+                self.prev_devices.iter().map(|(k, name, f)| (*k, (name.as_str(), *f))).collect();
+            let known: HashSet<AudioObjectID> = prev.keys().map(|(id, _)| *id).collect();
 
             let mut changes: Vec<(EventKind, String)> = Vec::new();
-            let mut announced: HashSet<&str> = HashSet::new();
+            let mut announced: HashSet<AudioObjectID> = HashSet::new();
             for d in devices {
-                let key = (d.name.clone(), d.direction.is_input());
-                match prev.get(&key) {
+                match prev.get(&(d.id, d.direction.is_input())) {
                     // A new device announces itself once, not once per scope.
-                    None if !known.contains(d.name.as_str())
-                        && announced.insert(d.name.as_str()) =>
-                    {
+                    None if !known.contains(&d.id) && announced.insert(d.id) => {
                         changes.push((
                             EventKind::DeviceAdded,
                             format!("{} ({})", d.name, d.transport.name()),
@@ -414,7 +407,7 @@ impl CoreAudio {
                     // A scope appearing on a device we already knew about is
                     // not a new device and not a format change.
                     None => {}
-                    Some(f) if *f != d.format => changes.push((
+                    Some((_, f)) if *f != d.format => changes.push((
                         EventKind::FormatChanged,
                         format!(
                             "{} {}: {} \u{2192} {}",
@@ -432,17 +425,17 @@ impl CoreAudio {
             }
             // Removals are reported once per device, not once per direction:
             // unplugging one interface is one event however many scopes it had.
-            let live: HashSet<&str> = devices.iter().map(|d| d.name.as_str()).collect();
-            let mut gone: Vec<String> = self
+            let live: HashSet<AudioObjectID> = devices.iter().map(|d| d.id).collect();
+            let mut gone: Vec<(AudioObjectID, String)> = self
                 .prev_devices
                 .iter()
-                .map(|((n, _), _)| n.clone())
-                .filter(|n| !live.contains(n.as_str()))
+                .filter(|((id, _), _, _)| !live.contains(id))
+                .map(|((id, _), name, _)| (*id, name.clone()))
                 .collect();
             gone.sort_unstable();
-            gone.dedup();
-            for n in gone {
-                self.log(now, EventKind::DeviceRemoved, n);
+            gone.dedup_by_key(|(id, _)| *id);
+            for (_, name) in gone {
+                self.log(now, EventKind::DeviceRemoved, name);
             }
 
             let default_changes: Vec<String> = [
@@ -477,8 +470,10 @@ impl CoreAudio {
             self.prev_streams = live_streams;
         }
 
-        self.prev_devices =
-            devices.iter().map(|d| ((d.name.clone(), d.direction.is_input()), d.format)).collect();
+        self.prev_devices = devices
+            .iter()
+            .map(|d| ((d.id, d.direction.is_input()), d.name.clone(), d.format))
+            .collect();
         self.prev_default_out = default_out.map(|d| d.name.clone());
         self.prev_default_in = default_in.map(|d| d.name.clone());
     }
@@ -963,6 +958,155 @@ mod tests {
     /// one, so the hardware tests are now explicitly observers.
     fn observer() -> CoreAudio {
         CoreAudio::new(Metering::OBSERVE_ONLY)
+    }
+
+    fn dev(id: AudioObjectID, name: &str, dir: Direction, rate: u32, ch: u8) -> Device {
+        Device {
+            id,
+            name: name.into(),
+            direction: dir,
+            format: Format { rate, bits: 24, channels: ch },
+            buffer_frames: 512,
+            latency_frames: 0,
+            is_default: false,
+            is_running: true,
+            uid: None,
+            manufacturer: None,
+            transport: Transport::Usb,
+            device_latency: 0,
+            stream_latency: 0,
+            safety_offset: 0,
+            buffer_range: None,
+            clock_domain: 0,
+            is_alive: true,
+            sub_device_uids: Vec::new(),
+        }
+    }
+
+    /// A duplex interface is two entries under one name with different channel
+    /// counts. Keyed by name alone the two halves compared against each other
+    /// every tick and reported a format change from a value to itself — once a
+    /// second, until the event log had evicted everything real and Insights
+    /// showed a permanent warning.
+    #[test]
+    fn a_duplex_device_does_not_report_a_format_change_every_tick() {
+        let mut be = observer();
+        let devices = vec![
+            dev(9, "Scarlett 2i2", Direction::Output, 48_000, 2),
+            dev(9, "Scarlett 2i2", Direction::Input, 48_000, 1),
+        ];
+        be.record_changes(Timestamp(0), &devices, None, None, &[]);
+        for t in 1..10u64 {
+            be.record_changes(Timestamp(t * 1000), &devices, None, None, &[]);
+        }
+        let spam = be.events.iter().filter(|e| e.kind == EventKind::FormatChanged).count();
+        assert_eq!(spam, 0, "a steady duplex device reported {spam} format changes");
+    }
+
+    /// Plugging one in is one event, not one per scope.
+    #[test]
+    fn plugging_in_a_duplex_device_is_a_single_event() {
+        let mut be = observer();
+        be.record_changes(Timestamp(0), &[], None, None, &[]);
+        let devices = vec![
+            dev(9, "Scarlett 2i2", Direction::Output, 48_000, 2),
+            dev(9, "Scarlett 2i2", Direction::Input, 48_000, 1),
+        ];
+        be.record_changes(Timestamp(1000), &devices, None, None, &[]);
+        let added = be.events.iter().filter(|e| e.kind == EventKind::DeviceAdded).count();
+        assert_eq!(added, 1, "one interface produced {added} add events");
+
+        be.record_changes(Timestamp(2000), &[], None, None, &[]);
+        let removed = be.events.iter().filter(|e| e.kind == EventKind::DeviceRemoved).count();
+        assert_eq!(removed, 1, "one interface produced {removed} removals");
+    }
+
+    /// Two devices can share a name — two identical USB interfaces, or an
+    /// aggregate wrapping a device under it. Keyed by name they collapse to one
+    /// entry, reproduce the flood, and swallow genuine add and remove events.
+    #[test]
+    fn two_devices_with_the_same_name_are_told_apart() {
+        let both = vec![
+            dev(10, "USB Audio CODEC", Direction::Output, 44_100, 2),
+            dev(11, "USB Audio CODEC", Direction::Output, 48_000, 2),
+        ];
+        let mut be = observer();
+        be.record_changes(Timestamp(0), &both, None, None, &[]);
+        for t in 1..10u64 {
+            be.record_changes(Timestamp(t * 1000), &both, None, None, &[]);
+        }
+        let spam = be.events.iter().filter(|e| e.kind == EventKind::FormatChanged).count();
+        assert_eq!(spam, 0, "two same-named devices reported {spam} format changes");
+
+        let mut be = observer();
+        be.record_changes(Timestamp(0), &both[..1], None, None, &[]);
+        be.record_changes(Timestamp(1000), &both, None, None, &[]);
+        assert_eq!(
+            be.events.iter().filter(|e| e.kind == EventKind::DeviceAdded).count(),
+            1,
+            "the second same-named device was not reported as added"
+        );
+        be.record_changes(Timestamp(2000), &both[..1], None, None, &[]);
+        assert_eq!(
+            be.events.iter().filter(|e| e.kind == EventKind::DeviceRemoved).count(),
+            1,
+            "the second same-named device was not reported as removed"
+        );
+    }
+
+    /// A real format change still has to be reported.
+    #[test]
+    fn a_real_format_change_is_still_caught() {
+        let mut be = observer();
+        let before = vec![dev(3, "AirPods", Direction::Output, 48_000, 2)];
+        let after = vec![dev(3, "AirPods", Direction::Output, 16_000, 2)];
+        be.record_changes(Timestamp(0), &before, None, None, &[]);
+        be.record_changes(Timestamp(1000), &after, None, None, &[]);
+        let e = be
+            .events
+            .iter()
+            .find(|e| e.kind == EventKind::FormatChanged)
+            .expect("a real rate change went unreported");
+        assert!(e.what.contains("48k") && e.what.contains("16k"), "{}", e.what);
+    }
+
+    /// What was already playing when the tool attached is the initial state,
+    /// not an event that happened a second after launch.
+    #[test]
+    fn streams_present_at_launch_are_not_logged_as_opening() {
+        let mut be = observer();
+        let s = Stream {
+            key: "1:out:2".into(),
+            app: "Spotify".into(),
+            pid: Some(1),
+            device: "Speakers".into(),
+            device_id: 2,
+            direction: Direction::Output,
+            format: Format::default(),
+            requested: None,
+            level_dbfs: None,
+            latency_ms: None,
+            node_id: None,
+            first_seen: Timestamp(0),
+        };
+        be.record_changes(Timestamp(0), &[], None, None, std::slice::from_ref(&s));
+        be.record_changes(Timestamp(1000), &[], None, None, std::slice::from_ref(&s));
+        let opened = be.events.iter().filter(|e| e.kind == EventKind::StreamOpened).count();
+        assert_eq!(opened, 0, "a stream already playing was logged as opening");
+    }
+
+    /// A session launched with --meter-input has to be able to switch it off.
+    /// The worker used to seed its idea of the state to false, so the first
+    /// switch-off was computed as a no-op and the capture stream stayed open
+    /// while the menu said it was closed.
+    #[test]
+    fn input_metering_can_be_switched_off_from_on() {
+        let mut be = CoreAudio::new(Metering { output: false, input: false });
+        assert!(!be.input_metering());
+        be.metering.input = true;
+        be.set_input_metering(false);
+        assert!(!be.input_metering(), "switching off from on was ignored");
+        assert!(be.input.live().is_none());
     }
 
     #[test]

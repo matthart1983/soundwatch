@@ -664,11 +664,17 @@ fn prompt(c: &mut Canvas, l: &Layout, app: &App) {
 
     // The list is eight rows and a desktop routinely has more. The spec has no
     // overflow story at all; row 22 is otherwise blank, so it carries the range.
-    let rows = app.list_rows();
-    if shown > rows {
-        let last = (app.scroll + rows).min(shown);
-        let range = format!("{}-{} of {}", app.scroll + 1, last, shown);
-        c.right(l.content, l.row_prompt, &range, theme::FAINT);
+    //
+    // On the tabbed screens each tab draws its own range in its own body, and
+    // this row would otherwise report a *stream* count while you scrolled a
+    // device list — a number computed from one list and labelled with another.
+    if l.chrome != crate::layout::Chrome::Tabs {
+        let rows = app.list_rows();
+        if shown > rows {
+            let last = (app.scroll + rows).min(shown);
+            let range = format!("{}-{} of {}", app.scroll + 1, last, shown);
+            c.right(l.content, l.row_prompt, &range, theme::FAINT);
+        }
     }
 }
 

@@ -36,8 +36,8 @@ pub fn draw(c: &mut Canvas, l: &Layout, app: &App) {
 
     let rows = (l.body_top + l.body_rows).saturating_sub(y) as usize;
     // Newest first. A log you have to scroll to the bottom of to see the most
-    // recent thing is a log nobody reads.
-    for (i, e) in app.snap.events.iter().rev().take(rows).enumerate() {
+    // recent thing is a log nobody reads. `scroll` walks back through it.
+    for (i, e) in app.snap.events.iter().rev().skip(app.scroll).take(rows).enumerate() {
         let row = y + i as u16;
         let secs = app.snap.at.secs_since(e.at);
         let ago = if secs < 60 {
@@ -53,11 +53,11 @@ pub fn draw(c: &mut Canvas, l: &Layout, app: &App) {
         c.left(f_what, row, &e.what, theme::FG);
     }
 
-    if app.snap.events.len() > rows {
+    if app.snap.events.len() > rows + app.scroll {
         c.right(
             f,
             l.body_top + l.body_rows - 1,
-            &format!("{} older", app.snap.events.len() - rows),
+            &format!("{} older", app.snap.events.len() - rows - app.scroll),
             theme::FAINT,
         );
     }

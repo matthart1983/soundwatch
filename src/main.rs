@@ -773,6 +773,69 @@ mod tests {
         assert_eq!(app.sel, 1, "Devices froze when no audio was playing");
     }
 
+    /// A selection that can move must stay visible. Making Devices, Xruns and
+    /// Timeline selectable without teaching them to honour `scroll` left the
+    /// highlight walking off the bottom of a fixed first-N window.
+    #[test]
+    fn a_scrolled_selection_stays_on_screen() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+
+        let mut app = App::demo(config::Config::default());
+        app.set_viewport(80, 24);
+        // More devices than the body can hold.
+        let template = app.snap.devices[0].clone();
+        for i in 0..40 {
+            let mut d = template.clone();
+            d.id = 100 + i;
+            d.name = format!("Interface {i}");
+            app.snap.devices.push(d);
+        }
+        app.select_tab(crate::tabs::Tab::Devices);
+        for _ in 0..30 {
+            app.on_key(down);
+            assert!(
+                app.sel >= app.scroll && app.sel < app.scroll + app.list_rows(),
+                "selection {} left the window [{}, {})",
+                app.sel,
+                app.scroll,
+                app.scroll + app.list_rows()
+            );
+        }
+        assert!(app.scroll > 0, "a list longer than the body never scrolled");
+
+        // And the drawn frame must actually show the selected row.
+        let s = render_once_at(&mut app, "devices", false, 80, 24).expect("render");
+        assert!(
+            s.contains(&app.snap.devices[app.sel].name),
+            "the selected device is not on screen"
+        );
+    }
+
+    /// The prompt's stream range must not appear on tabs that are not showing
+    /// streams: it was computed from whichever list the selection was on and
+    /// labelled as a stream count regardless.
+    #[test]
+    fn the_stream_range_does_not_leak_onto_other_tabs() {
+        let mut app = App::demo(config::Config::default());
+        app.set_viewport(80, 24);
+        let template = app.snap.streams[0].clone();
+        for i in 0..40 {
+            let mut st = template.clone();
+            st.key = format!("x{i}");
+            app.snap.streams.push(st);
+        }
+        for tab in [crate::tabs::Tab::Latency, crate::tabs::Tab::Routing] {
+            let s = render_once_at(&mut app, tab.name(), false, 80, 24).expect("render");
+            let l = crate::layout::Layout::new(80, 24, crate::layout::Chrome::Tabs);
+            let prompt = s.lines().nth(l.row_prompt as usize).unwrap_or("");
+            assert!(
+                !prompt.contains(" of "),
+                "{tab:?} shows a stream range it is not displaying: {prompt:?}"
+            );
+        }
+    }
+
     /// The tabbed tables draw into the body, which is taller than the Lite
     /// list. Sizing the scroll window by the wrong one hid rows above a table
     /// with blank space below it.

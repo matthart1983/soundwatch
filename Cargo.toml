@@ -34,4 +34,14 @@ opt-level = 3
 lto = true
 codegen-units = 1
 strip = true
-panic = "abort"
+# Deliberately *not* `panic = "abort"`.
+#
+# Two CoreAudio callbacks run on threads this program does not own, and since
+# Rust 1.81 a panic crossing an `extern "C"` boundary aborts the process. Both
+# are wrapped in `catch_unwind` so a bug there costs a frozen meter rather than
+# the whole tool — but `catch_unwind` cannot catch anything when panics abort
+# at the site instead of unwinding, so with `panic = "abort"` those guards were
+# inert in exactly the build users run.
+#
+# Unwinding also lets the panic hook restore the terminal before exiting, which
+# is the difference between a stack trace and a wrecked shell.
