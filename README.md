@@ -5,6 +5,10 @@
 
 ![SoundWatch](docs/media/demo.gif)
 
+*Recorded in the btop theme — charts in braille, two sub-columns per cell.
+The palette switches to `spec` near the end; up to that point the colours are
+the recording terminal's own.*
+
 Fourth member of the family after [NetWatch](https://github.com/matthart1983/netwatch),
 [SysWatch](https://github.com/matthart1983/syswatch) and
 [DiskWatch](https://github.com/matthart1983/diskwatch).

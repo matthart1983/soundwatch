@@ -1,4 +1,9 @@
 # SoundWatch demo — recorded with vhs (github.com/charmbracelet/vhs)
+#
+# Recorded in the btop theme: charts in braille, two sub-columns per cell, and
+# bars shaded by height. The palette is left at its default, so the colours are
+# whatever the recording terminal defines — the tape switches it to `spec` near
+# the end to show both.
 Output docs/media/demo.gif
 
 Set Shell zsh
@@ -12,15 +17,15 @@ Set TypingSpeed 40ms
 
 Hide
 Type "cd ~/projects/soundwatch"  Enter
-Type "alias soundwatch=./target/debug/soundwatch"  Enter
+Type "alias soundwatch=./target/release/soundwatch"  Enter
 Type "clear"  Enter
 Sleep 500ms
 Show
 
-Type "soundwatch --demo"
+Type "soundwatch --demo --theme btop"
 Sleep 700ms
 Enter
-Sleep 2500ms
+Sleep 2800ms
 
 # [2] Devices — what exists and how it is attached
 Type "2"
@@ -32,9 +37,9 @@ Sleep 2400ms
 
 # [4] Meters — peak, RMS and the crest factor between them
 Type "4"
-Sleep 2600ms
+Sleep 3200ms
 
-# [5] Spectrum — what is in the signal
+# [5] Spectrum — what is in the signal, in braille
 Type "5"
 Sleep 3800ms
 
@@ -46,15 +51,18 @@ Sleep 2600ms
 Type "0"
 Sleep 3200ms
 
-# the settings menu, and the btop theme
+# Settings: down one row to `palette`, and off the terminal's colours onto
+# the design handoff's own.
 Type ","
 Sleep 1600ms
+Down
+Sleep 1200ms
 Right
-Sleep 1800ms
+Sleep 2000ms
 Escape
 Sleep 800ms
 
-# back to the spectrum, now in braille with a gradient
+# Back to the spectrum, in the handoff palette
 Type "5"
 Sleep 4000ms
 
