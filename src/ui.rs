@@ -821,11 +821,16 @@ fn spectrum(c: &mut Canvas, l: &Layout, app: &App) {
             let level = chunk.iter().map(|c| c.level).fold(f32::NEG_INFINITY, f32::max);
             if hold > level + 1.0 {
                 let hcell = (crate::spectrum::norm(hold, sp.floor()) * rows as f32).round() as u16;
-                if hcell > 0 && hcell <= rows {
+                // The 1 dB guard keeps the cap off a bar it is level with, but
+                // 1 dB of a 96 dB scale is a fraction of a cell — it still
+                // rounds onto the bar's own top cell and overwrites it. Same
+                // rule as the meters' cap: sit above what the bar painted.
+                let bar_top = (0..rows).rev().find(|&gy| grid[gy as usize][x].is_some());
+                if let Some(gy) = chart::cap_row(hcell, rows, bar_top) {
                     // Match the glyph family the bars are drawn in, or the cap
                     // sits a pixel low and reads as a different kind of mark.
                     let cap = if sub == 2 { '\u{28C0}' } else { blocks[0] };
-                    c.set(l.content.x0 + x as u16, top + rows - hcell, cap, theme::faint());
+                    c.set(l.content.x0 + x as u16, top + rows - 1 - gy, cap, theme::faint());
                 }
             }
         }

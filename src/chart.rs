@@ -113,6 +113,35 @@ pub fn bars(
     out
 }
 
+/// Which row the peak cap goes on, in bottom-up cell coordinates, or `None`
+/// if it cannot be drawn without damaging the bar.
+///
+/// `h` is the cap's height in whole cells and `bar_top` is the topmost cell
+/// the RMS bar actually painted.
+///
+/// The cap belongs *above* the bar, never inside it. The bar is drawn in
+/// eighths of a cell while the cap is placed to the nearest whole cell, so a
+/// small crest factor rounds both into the same cell — and the caller would
+/// then `set` the cap glyph straight through a solid block, perforating every
+/// bar on screen. That was the bug this exists to make untestable-by-accident.
+pub fn cap_row(h: u16, rows: u16, bar_top: Option<u16>) -> Option<u16> {
+    if h == 0 || h > rows {
+        return None;
+    }
+    let gy = h - 1;
+    let Some(top) = bar_top else { return Some(gy) };
+    if gy > top {
+        return Some(gy);
+    }
+    // A full-scale bar leaves nowhere above it to sit. The bar already reads
+    // as "at the top"; punching a hole in it to say so again tells you less
+    // than the solid bar already does.
+    if top + 1 >= rows {
+        return None;
+    }
+    Some(top + 1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,5 +246,50 @@ mod tests {
                 assert!((BRAILLE_BASE..BRAILLE_BASE + 256).contains(&c), "{cell:?} is not braille");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod cap_tests {
+    use super::cap_row;
+
+    #[test]
+    fn a_cap_clear_of_the_bar_stays_where_it_lands() {
+        // Bar tops out at cell 1, cap wants cell 3: nothing to resolve.
+        assert_eq!(cap_row(4, 8, Some(1)), Some(3));
+    }
+
+    #[test]
+    fn a_cap_landing_inside_the_bar_is_lifted_clear_of_it() {
+        // This is the perforation. Peak and RMS round into the same cell, so
+        // the cap wants a cell the bar has already painted; drawing it there
+        // punches the cap glyph through a solid block.
+        for (h, top) in [(1u16, 0u16), (2, 1), (3, 3), (4, 5)] {
+            let got = cap_row(h, 8, Some(top)).expect("a cap should still be drawn");
+            assert!(
+                got > top,
+                "cap at h={h} over a bar topping at {top} landed on {got}, inside the bar"
+            );
+            assert_eq!(got, top + 1, "the cap should sit directly above the bar, not float");
+        }
+    }
+
+    #[test]
+    fn a_full_scale_bar_drops_the_cap_rather_than_holing_itself() {
+        // Nowhere above the bar to put it. A hole would say less than the
+        // solid full-height bar already does.
+        assert_eq!(cap_row(8, 8, Some(7)), None);
+        assert_eq!(cap_row(4, 8, Some(7)), None);
+    }
+
+    #[test]
+    fn an_unpainted_column_keeps_the_cap_where_it_lands() {
+        assert_eq!(cap_row(5, 8, None), Some(4));
+    }
+
+    #[test]
+    fn out_of_range_heights_draw_nothing() {
+        assert_eq!(cap_row(0, 8, Some(0)), None, "a silent column has no cap");
+        assert_eq!(cap_row(9, 8, Some(0)), None, "a cap past the top is not drawn");
     }
 }
