@@ -29,7 +29,7 @@ pub fn mini_meter(c: &mut Canvas, l: &Layout, app: &App, top: u16, rows: u16, in
         (
             app.snap.default_in.as_ref(),
             &app.in_hist,
-            theme::CYAN,
+            theme::cyan(),
             app.snap.caps.input_levels,
             "dBFS in",
         )
@@ -37,7 +37,7 @@ pub fn mini_meter(c: &mut Canvas, l: &Layout, app: &App, top: u16, rows: u16, in
         (
             app.snap.default_out.as_ref(),
             &app.out_hist,
-            theme::GREEN,
+            theme::green(),
             app.snap.caps.device_levels,
             "dBFS out",
         )
@@ -77,7 +77,7 @@ pub fn render(app: &App, buf: &mut Buffer, area: Rect) {
     let mut c =
         Canvas::new(buf, area.x, area.y, l.w.min(area.width), l.h.min(area.height), app.glyphs);
 
-    c.clear(theme::BG);
+    c.clear(theme::bg());
 
     // The full product: chrome plus whichever tab is active. Lite keeps the
     // handoff's single screen, which is what its row numbers are pinned to.
@@ -85,7 +85,7 @@ pub fn render(app: &App, buf: &mut Buffer, area: Rect) {
         header_full(&mut c, &l, app);
         crate::tabs::bar(&mut c, &l, app);
         crate::tabs::body(&mut c, &l, app);
-        c.rule(l.content, l.row_footer_rule, theme::FAINT);
+        c.rule(l.content, l.row_footer_rule, theme::faint());
         prompt(&mut c, &l, app);
         footer(&mut c, &l, app);
         if app.mode == Mode::Help {
@@ -132,7 +132,7 @@ fn too_small(buf: &mut Buffer, area: Rect) {
     for (i, ch) in msg.chars().enumerate() {
         if let Some(cell) = buf.cell_mut((x + i as u16, y)) {
             cell.set_char(ch);
-            cell.set_fg(theme::DIM);
+            cell.set_fg(theme::dim());
         }
     }
 }
@@ -144,45 +144,45 @@ fn header_full(c: &mut Canvas, l: &Layout, app: &App) {
     let f = l.content;
     let live = !app.paused;
     let dot_fg = if app.verdict.is_alert() {
-        theme::RED
+        theme::red()
     } else if live {
-        theme::GREEN
+        theme::green()
     } else {
-        theme::YELLOW
+        theme::yellow()
     };
     let x = c.text(f, f.x0, l.row_header, c.g.dot, dot_fg, false);
-    let x = c.text(f, x + 1, l.row_header, "SoundWatch", theme::CYAN, true);
-    let x = c.text(f, x + 1, l.row_header, SHORT_VERSION, theme::DIM, false);
-    let x = c.text(f, x + 2, l.row_header, "\u{2502}", theme::FAINT, false);
-    let x = c.text(f, x + 2, l.row_header, "host", theme::DIM, false);
-    let x = c.text(f, x + 1, l.row_header, &app.snap.host, theme::FG, false);
-    let x = c.text(f, x + 2, l.row_header, app.snap.backend, theme::DIM, false);
+    let x = c.text(f, x + 1, l.row_header, "SoundWatch", theme::cyan(), true);
+    let x = c.text(f, x + 1, l.row_header, SHORT_VERSION, theme::dim(), false);
+    let x = c.text(f, x + 2, l.row_header, "\u{2502}", theme::faint(), false);
+    let x = c.text(f, x + 2, l.row_header, "host", theme::dim(), false);
+    let x = c.text(f, x + 1, l.row_header, &app.snap.host, theme::fg(), false);
+    let x = c.text(f, x + 2, l.row_header, app.snap.backend, theme::dim(), false);
 
     // Right group: the verdict, then the state word.
     let (word, fg) = if app.paused {
-        ("PAUSED", theme::YELLOW)
+        ("PAUSED", theme::yellow())
     } else if let Verdict::Alert { .. } = &app.verdict {
-        ("ALERT", theme::RED)
+        ("ALERT", theme::red())
     } else {
-        ("LIVE", theme::GREEN)
+        ("LIVE", theme::green())
     };
     c.right(f, l.row_header, word, fg);
     if let Verdict::Alert { headline, .. } = &app.verdict {
         let room = f.x1.saturating_sub(width(word) + 2);
-        c.right(Field::new(x + 2, room), l.row_header, headline, theme::RED);
+        c.right(Field::new(x + 2, room), l.row_header, headline, theme::red());
     }
 }
 
 fn header(c: &mut Canvas, l: &Layout, app: &App) {
     let (right, right_fg, dot) = if app.paused {
-        (format!("{} PAUSED", c.g.paused), theme::YELLOW, None)
+        (format!("{} PAUSED", c.g.paused), theme::yellow(), None)
     } else if let Verdict::Alert { headline, .. } = &app.verdict {
-        (headline.clone(), theme::RED, Some(theme::RED))
+        (headline.clone(), theme::red(), Some(theme::red()))
     } else {
         let d = app.snap.default_out.as_ref();
         let f = d.map(|d| fmt::rate_bits(d.format.rate, d.format.bits)).unwrap_or(fmt::NA.into());
         let b = d.map(|d| fmt::frames(d.buffer_frames)).unwrap_or(fmt::NA.into());
-        (format!("{f} \u{b7} {b}"), theme::DIM, Some(theme::GREEN))
+        (format!("{f} \u{b7} {b}"), theme::dim(), Some(theme::green()))
     };
 
     // Reserve the right group first, then fit the left into what remains.
@@ -200,14 +200,14 @@ fn header(c: &mut Canvas, l: &Layout, app: &App) {
 
     let name = "soundwatch";
     let backend = format!(" \u{b7} {}", app.snap.backend);
-    let mut x = c.text(left, left.x0, l.row_header, name, theme::FG, true);
+    let mut x = c.text(left, left.x0, l.row_header, name, theme::fg(), true);
     // The hostname is the elastic element: a studio box reached over SSH can
     // easily carry a 40-character FQDN, and the spec bounds neither it nor the
     // backend name.
     let host_room = left.width().saturating_sub(width(name) + 2 + width(&backend));
     let host = format!("  {}", crate::grid::truncate(&app.snap.host, host_room));
-    x = c.text(left, x, l.row_header, &host, theme::CYAN, false);
-    c.text(left, x, l.row_header, &backend, theme::DIM, false);
+    x = c.text(left, x, l.row_header, &host, theme::cyan(), false);
+    c.text(left, x, l.row_header, &backend, theme::dim(), false);
 }
 
 // ── rows 2-8 ─────────────────────────────────────────────────────────────────
@@ -226,7 +226,7 @@ fn meters(c: &mut Canvas, l: &Layout, app: &App) {
         app,
         l.row_out_label,
         c.g.out,
-        theme::GREEN,
+        theme::green(),
         "dBFS out",
         &app.out_hist,
         out_live,
@@ -241,7 +241,7 @@ fn meters(c: &mut Canvas, l: &Layout, app: &App) {
             top: l.row_out_meter,
             h: l.out_meter_h,
             hist: &app.out_hist,
-            base: theme::GREEN,
+            base: theme::green(),
             live: out_live,
         },
     );
@@ -254,7 +254,7 @@ fn meters(c: &mut Canvas, l: &Layout, app: &App) {
         app,
         l.row_in_label,
         c.g.inp,
-        theme::CYAN,
+        theme::cyan(),
         if has_input { "dBFS in" } else { "no input" },
         &app.in_hist,
         in_live,
@@ -269,7 +269,7 @@ fn meters(c: &mut Canvas, l: &Layout, app: &App) {
             top: l.row_in_meter,
             h: l.in_meter_h,
             hist: &app.in_hist,
-            base: theme::CYAN,
+            base: theme::cyan(),
             live: in_live,
         },
     );
@@ -289,21 +289,21 @@ fn meter_label(
     fmt_str: Option<String>,
     device: Option<String>,
 ) {
-    let arrow_fg = if app.paused { theme::FAINT } else { base };
+    let arrow_fg = if app.paused { theme::faint() } else { base };
     c.text(l.content, 1, row, glyph, arrow_fg, true);
 
     // Current level, right-aligned in cols 3..=7 so "-8.2" and "-31.6" agree.
     let cur = hist.current().filter(|_| live && hist.has_data());
-    let level_fg = if app.paused { theme::FAINT } else { theme::BR_WHITE };
+    let level_fg = if app.paused { theme::faint() } else { theme::br_white() };
     match cur {
         Some(d) => {
             c.right_bold(Field::at(3, 5), row, &fmt::dbfs(d), level_fg);
         }
         None => {
-            c.right(Field::at(3, 5), row, fmt::NA, theme::DIM);
+            c.right(Field::at(3, 5), row, fmt::NA, theme::dim());
         }
     }
-    let unit_end = c.text(l.content, 9, row, unit, theme::DIM, false);
+    let unit_end = c.text(l.content, 9, row, unit, theme::dim(), false);
 
     // Right group: peak, format, device. The device name is the elastic part and
     // absorbs the truncation — real PulseAudio and CoreAudio descriptions run to
@@ -325,7 +325,7 @@ fn meter_label(
         }
         None => fixed,
     };
-    c.right(right, row, &text, theme::DIM);
+    c.right(right, row, &text, theme::dim());
 }
 
 /// One meter chart: where it goes, what it plots, and whether it is real.
@@ -344,7 +344,7 @@ fn meter_body(c: &mut Canvas, l: &Layout, app: &App, v: MeterView) {
         // Degraded: a flat faint baseline. Distinct from silence (which draws a
         // baseline in the direction colour) and from an unpainted region.
         for x in l.content.x0..=l.content.x1 {
-            c.set(x, top + h - 1, blocks[0], theme::FAINT);
+            c.set(x, top + h - 1, blocks[0], theme::faint());
         }
         return;
     }
@@ -369,7 +369,7 @@ fn meter_body(c: &mut Canvas, l: &Layout, app: &App, v: MeterView) {
                 .fold(f32::NEG_INFINITY, f32::max);
             let height = theme::row_height(y as u16, h);
             let fg = if app.paused {
-                theme::FAINT
+                theme::faint()
             } else {
                 theme::chart_cell(app.theme(), base, d, height)
             };
@@ -381,9 +381,9 @@ fn meter_body(c: &mut Canvas, l: &Layout, app: &App, v: MeterView) {
 // ── row 9 ────────────────────────────────────────────────────────────────────
 
 fn axis(c: &mut Canvas, l: &Layout, _app: &App) {
-    c.rule(l.content, l.row_axis, theme::FAINT);
-    c.text(l.content, 1, l.row_axis, " 60s ago ", theme::DIM, false);
-    c.right(l.content, l.row_axis, " now ", theme::DIM);
+    c.rule(l.content, l.row_axis, theme::faint());
+    c.text(l.content, 1, l.row_axis, " 60s ago ", theme::dim(), false);
+    c.right(l.content, l.row_axis, " now ", theme::dim());
 }
 
 // ── row 10 ───────────────────────────────────────────────────────────────────
@@ -401,7 +401,7 @@ fn vitals(c: &mut Canvas, l: &Layout, app: &App) {
         Field::new(verdict_x, l.content.x1),
         l.row_vitals,
         &verdict_text,
-        if alert { theme::RED } else { theme::FAINT },
+        if alert { theme::red() } else { theme::faint() },
     );
 
     let out = snap.default_out.as_ref();
@@ -440,13 +440,13 @@ fn vitals(c: &mut Canvas, l: &Layout, app: &App) {
         if i > 0 {
             x += 3;
         }
-        x = c.text(field, x, l.row_vitals, label, theme::DIM, false);
+        x = c.text(field, x, l.row_vitals, label, theme::dim(), false);
         x = c.text(
             field,
             x + 1,
             l.row_vitals,
             value,
-            if *bad { theme::RED } else { theme::FG },
+            if *bad { theme::red() } else { theme::fg() },
             false,
         );
     }
@@ -457,7 +457,7 @@ fn vitals(c: &mut Canvas, l: &Layout, app: &App) {
 fn note(c: &mut Canvas, l: &Layout, app: &App) {
     // A backend that has not answered outranks anything it might have said.
     if let Some(stall) = app.backend_stall() {
-        c.left(l.content, l.row_note, stall, theme::FAINT);
+        c.left(l.content, l.row_note, stall, theme::faint());
         return;
     }
     let mut msg = app.snap.caps.note.clone();
@@ -465,20 +465,20 @@ fn note(c: &mut Canvas, l: &Layout, app: &App) {
         msg = Some("latency is the output path only: nothing is capturing".into());
     }
     if let Some(m) = msg {
-        c.left(l.content, l.row_note, &m, theme::FAINT);
+        c.left(l.content, l.row_note, &m, theme::faint());
     }
 }
 
 // ── rows 12-21 ───────────────────────────────────────────────────────────────
 
 fn table(c: &mut Canvas, l: &Layout, app: &App) {
-    c.left(l.f_app, l.row_table_head, "APP", theme::DIM);
-    c.left(l.f_device, l.row_table_head, "DEVICE", theme::DIM);
-    c.right(l.f_level, l.row_table_head, "LEVEL", theme::DIM);
-    c.right(l.f_rate, l.row_table_head, "RATE", theme::DIM);
-    c.right(l.f_lat, l.row_table_head, "LAT", theme::DIM);
-    c.left(l.f_spark, l.row_table_head, "60s", theme::DIM);
-    c.rule(l.content, l.row_table_rule, theme::FAINT);
+    c.left(l.f_app, l.row_table_head, "APP", theme::dim());
+    c.left(l.f_device, l.row_table_head, "DEVICE", theme::dim());
+    c.right(l.f_level, l.row_table_head, "LEVEL", theme::dim());
+    c.right(l.f_rate, l.row_table_head, "RATE", theme::dim());
+    c.right(l.f_lat, l.row_table_head, "LAT", theme::dim());
+    c.left(l.f_spark, l.row_table_head, "60s", theme::dim());
+    c.rule(l.content, l.row_table_rule, theme::faint());
 
     let visible = app.visible();
     if visible.is_empty() {
@@ -489,7 +489,7 @@ fn table(c: &mut Canvas, l: &Layout, app: &App) {
         } else {
             "no audio streams active"
         };
-        c.left(l.content, l.row_list, msg, theme::FAINT);
+        c.left(l.content, l.row_list, msg, theme::faint());
         return;
     }
 
@@ -503,29 +503,29 @@ fn table(c: &mut Canvas, l: &Layout, app: &App) {
 
 fn stream_row(c: &mut Canvas, l: &Layout, app: &App, y: u16, s: &Stream, selected: bool) {
     if selected {
-        c.tint(l.content, y, theme::SEL_BG);
+        c.tint(l.content, y, theme::sel_bg());
     }
     let is_in = s.direction.is_input();
     let base = theme::direction(is_in);
-    let dim_if_paused = |col: Color| if app.paused { theme::FAINT } else { col };
+    let dim_if_paused = |col: Color| if app.paused { theme::faint() } else { col };
 
-    c.left(l.f_app, y, &s.app, theme::FG);
+    c.left(l.f_app, y, &s.app, theme::fg());
 
     if is_in {
         // The mic-in-use marker. This is why there is no DIRECTION column.
-        c.text(l.f_device, l.f_device.x0, y, c.g.dot, dim_if_paused(theme::CYAN), false);
-        c.left(l.f_device_in, y, &s.device, theme::DIM);
+        c.text(l.f_device, l.f_device.x0, y, c.g.dot, dim_if_paused(theme::cyan()), false);
+        c.left(l.f_device_in, y, &s.device, theme::dim());
     } else {
-        c.left(l.f_device, y, &s.device, theme::DIM);
+        c.left(l.f_device, y, &s.device, theme::dim());
     }
 
     match s.level_dbfs.filter(|_| app.snap.caps.stream_levels) {
         Some(d) => {
-            let fg = if app.paused { theme::FAINT } else { theme::level(d, base) };
+            let fg = if app.paused { theme::faint() } else { theme::level(d, base) };
             c.right(l.f_level, y, &fmt::dbfs(d), fg);
         }
         None => {
-            c.right(l.f_level, y, fmt::NA, theme::DIM);
+            c.right(l.f_level, y, fmt::NA, theme::dim());
         }
     }
 
@@ -539,21 +539,21 @@ fn stream_row(c: &mut Canvas, l: &Layout, app: &App, y: u16, s: &Stream, selecte
         )
     });
     match conv {
-        Some(text) => c.right(l.f_rate, y, &text, dim_if_paused(theme::YELLOW)),
+        Some(text) => c.right(l.f_rate, y, &text, dim_if_paused(theme::yellow())),
         None => {
             let t = if s.format.rate == 0 {
                 fmt::NA.to_string()
             } else {
                 fmt::rate_bits(s.format.rate, s.format.bits)
             };
-            c.right(l.f_rate, y, &t, theme::DIM)
+            c.right(l.f_rate, y, &t, theme::dim())
         }
     };
 
     let lat = s.latency_ms.map(|v| fmt::ms(v, l.f_lat.width())).unwrap_or(fmt::NA.into());
-    c.right(l.f_lat, y, &lat, theme::DIM);
+    c.right(l.f_lat, y, &lat, theme::dim());
 
-    let spark_fg = if selected && !app.paused { base } else { theme::FAINT };
+    let spark_fg = if selected && !app.paused { base } else { theme::faint() };
     if let Some(h) = app.history_for(&s.key).filter(|h| h.has_data()) {
         let cells = h.columns(l.f_spark.width() as usize);
         for (i, d) in cells.iter().enumerate() {
@@ -571,7 +571,7 @@ fn stream_row(c: &mut Canvas, l: &Layout, app: &App, y: u16, s: &Stream, selecte
 
 fn detail(c: &mut Canvas, l: &Layout, app: &App) {
     let Some(s) = app.selected() else { return };
-    c.text(l.content, 3, l.row_detail(), c.g.corner, theme::FAINT, false);
+    c.text(l.content, 3, l.row_detail(), c.g.corner, theme::faint(), false);
 
     let body = Field::new(6, l.content.x1);
     let layout = match s.format.channels {
@@ -587,7 +587,7 @@ fn detail(c: &mut Canvas, l: &Layout, app: &App) {
         body,
         l.row_detail(),
         &format!("pid {pid}   node {node}   direction {dir}   {layout}"),
-        theme::DIM,
+        theme::dim(),
     );
 
     let rate = if s.format.rate == 0 {
@@ -611,7 +611,7 @@ fn detail(c: &mut Canvas, l: &Layout, app: &App) {
         .as_ref()
         .map(|d| format!("   {}", fmt::frames(d.buffer_frames)))
         .unwrap_or_default();
-    c.left(body, l.row_detail() + 1, &format!("{rate}{conv}{buffer}"), theme::DIM);
+    c.left(body, l.row_detail() + 1, &format!("{rate}{conv}{buffer}"), theme::dim());
 
     let lat = s
         .latency_ms
@@ -626,7 +626,7 @@ fn detail(c: &mut Canvas, l: &Layout, app: &App) {
     // only know when this process first saw it.
     let held_label = if app.snap.caps.hold_is_since_launch { "observed" } else { "held" };
     let held = format!("{held_label} {}", fmt::hms(app.snap.at.secs_since(s.first_seen)));
-    c.left(body, l.row_detail() + 2, &format!("{lat}   {peak}   {held}"), theme::DIM);
+    c.left(body, l.row_detail() + 2, &format!("{lat}   {peak}   {held}"), theme::dim());
 }
 
 // ── row 22 ───────────────────────────────────────────────────────────────────
@@ -636,26 +636,26 @@ fn prompt(c: &mut Canvas, l: &Layout, app: &App) {
     let shown = app.visible().len();
 
     if app.mode == Mode::Filter {
-        c.text(l.content, 1, l.row_prompt, "/", theme::YELLOW, true);
+        c.text(l.content, 1, l.row_prompt, "/", theme::yellow(), true);
         let query_field = Field::new(3, l.content.x1.saturating_sub(18));
-        let x = c.text(query_field, 3, l.row_prompt, &app.query, theme::FG, false);
-        c.text(l.content, x, l.row_prompt, c.g.cursor, theme::FG, false);
+        let x = c.text(query_field, 3, l.row_prompt, &app.query, theme::fg(), false);
+        c.text(l.content, x, l.row_prompt, c.g.cursor, theme::fg(), false);
         // Derived from the filtered set, never hardcoded.
         let count = format!("{shown} of {total} match");
-        c.text(l.content, x + width(c.g.cursor) + 2, l.row_prompt, &count, theme::DIM, false);
+        c.text(l.content, x + width(c.g.cursor) + 2, l.row_prompt, &count, theme::dim(), false);
         return;
     }
 
     if let Some(q) = &app.applied {
-        c.text(l.content, 1, l.row_prompt, "/", theme::YELLOW, false);
+        c.text(l.content, 1, l.row_prompt, "/", theme::yellow(), false);
         let query_field = Field::new(3, l.content.x1.saturating_sub(18));
-        let x = c.text(query_field, 3, l.row_prompt, q, theme::DIM, false);
+        let x = c.text(query_field, 3, l.row_prompt, q, theme::dim(), false);
         c.text(
             l.content,
             x + 2,
             l.row_prompt,
             &format!("{shown} of {total} match"),
-            theme::FAINT,
+            theme::faint(),
             false,
         );
     }
@@ -671,7 +671,7 @@ fn prompt(c: &mut Canvas, l: &Layout, app: &App) {
         if shown > rows {
             let last = (app.scroll + rows).min(shown);
             let range = format!("{}-{} of {}", app.scroll + 1, last, shown);
-            c.right(l.content, l.row_prompt, &range, theme::FAINT);
+            c.right(l.content, l.row_prompt, &range, theme::faint());
         }
     }
 }
@@ -733,11 +733,11 @@ fn footer(c: &mut Canvas, l: &Layout, app: &App) {
             x += 3;
         }
         let key = if *k == "\u{21B5}" { c.g.enter } else { k };
-        x = c.text(field, x, l.row_footer, key, theme::CYAN, true);
-        x = c.text(field, x, l.row_footer, &format!(" {label}"), theme::DIM, false);
+        x = c.text(field, x, l.row_footer, key, theme::cyan(), true);
+        x = c.text(field, x, l.row_footer, &format!(" {label}"), theme::dim(), false);
     }
     if let Some(v) = version {
-        c.right(l.content, l.row_footer, v, theme::FAINT);
+        c.right(l.content, l.row_footer, v, theme::faint());
     }
 }
 
@@ -746,16 +746,16 @@ fn footer(c: &mut Canvas, l: &Layout, app: &App) {
 fn spectrum(c: &mut Canvas, l: &Layout, app: &App) {
     let sp = &app.spectrum;
     let base = match sp.source {
-        crate::spectrum::Source::Input => theme::CYAN,
-        _ => theme::GREEN,
+        crate::spectrum::Source::Input => theme::cyan(),
+        _ => theme::green(),
     };
     let glyph = if sp.source == crate::spectrum::Source::Input { c.g.inp } else { c.g.out };
     let (top, rows) = l.spectrum();
 
     // ── the label row ───────────────────────────────────────────────────────
-    let arrow_fg = if app.paused { theme::FAINT } else { base };
+    let arrow_fg = if app.paused { theme::faint() } else { base };
     let mut x = c.text(l.content, 1, l.row_out_label, glyph, arrow_fg, true);
-    x = c.text(l.content, x + 1, l.row_out_label, sp.source.label(), theme::FG, true);
+    x = c.text(l.content, x + 1, l.row_out_label, sp.source.label(), theme::fg(), true);
 
     let rate = sp.analysis().map(|a| a.rate).unwrap_or(0);
     let detail = if rate > 0 {
@@ -767,7 +767,7 @@ fn spectrum(c: &mut Canvas, l: &Layout, app: &App) {
     } else {
         "   waiting for audio".into()
     };
-    c.text(l.content, x, l.row_out_label, &detail, theme::DIM, false);
+    c.text(l.content, x, l.row_out_label, &detail, theme::dim(), false);
 
     // The peak readout is the elastic element: dropped whole rather than
     // truncated, because a truncated frequency is a wrong frequency.
@@ -779,7 +779,7 @@ fn spectrum(c: &mut Canvas, l: &Layout, app: &App) {
         };
         let right = Field::new(x + width(&detail) + 2, l.content.x1);
         if right.width() >= width(&text) {
-            c.right(right, l.row_out_label, &text, theme::DIM);
+            c.right(right, l.row_out_label, &text, theme::dim());
         }
     }
 
@@ -787,7 +787,7 @@ fn spectrum(c: &mut Canvas, l: &Layout, app: &App) {
     let cols = sp.columns();
     if cols.is_empty() {
         for cx in l.content.x0..=l.content.x1 {
-            c.set(cx, top + rows - 1, c.g.blocks[0], theme::FAINT);
+            c.set(cx, top + rows - 1, c.g.blocks[0], theme::faint());
         }
     } else {
         let blocks = c.g.blocks;
@@ -806,7 +806,7 @@ fn spectrum(c: &mut Canvas, l: &Layout, app: &App) {
                     .fold(f32::NEG_INFINITY, f32::max);
                 let height = theme::row_height(y as u16, rows);
                 let fg = if app.paused {
-                    theme::FAINT
+                    theme::faint()
                 } else {
                     theme::chart_cell(app.theme(), base, d, height)
                 };
@@ -825,7 +825,7 @@ fn spectrum(c: &mut Canvas, l: &Layout, app: &App) {
                     // Match the glyph family the bars are drawn in, or the cap
                     // sits a pixel low and reads as a different kind of mark.
                     let cap = if sub == 2 { '\u{28C0}' } else { blocks[0] };
-                    c.set(l.content.x0 + x as u16, top + rows - hcell, cap, theme::FAINT);
+                    c.set(l.content.x0 + x as u16, top + rows - hcell, cap, theme::faint());
                 }
             }
         }
@@ -833,7 +833,7 @@ fn spectrum(c: &mut Canvas, l: &Layout, app: &App) {
 
     // ── the frequency axis ──────────────────────────────────────────────────
     let arow = l.row_spectrum_axis();
-    c.rule(l.content, arow, theme::FAINT);
+    c.rule(l.content, arow, theme::faint());
     if rate > 0 {
         let axis = crate::spectrum::Axis::new(l.content.width(), rate as f32 / 2.0);
         for (hz, label) in [(100.0f32, "100"), (1000.0, "1k"), (10_000.0, "10k")] {
@@ -841,18 +841,18 @@ fn spectrum(c: &mut Canvas, l: &Layout, app: &App) {
                 let cx = l.content.x0 + col;
                 let half = width(label) / 2;
                 let start = cx.saturating_sub(half).max(l.content.x0);
-                c.text(l.content, start, arow, label, theme::DIM, false);
+                c.text(l.content, start, arow, label, theme::dim(), false);
             }
         }
-        c.text(l.content, l.content.x0, arow, "20", theme::DIM, false);
+        c.text(l.content, l.content.x0, arow, "20", theme::dim(), false);
     }
 
     // ── the verdict ─────────────────────────────────────────────────────────
     let vrow = l.row_spectrum_verdict();
     if let Some(v) = sp.verdict() {
-        c.left(l.content, vrow, &v, theme::RED);
+        c.left(l.content, vrow, &v, theme::red());
     } else if let Some(stall) = app.backend_stall() {
-        c.left(l.content, vrow, stall, theme::FAINT);
+        c.left(l.content, vrow, stall, theme::faint());
     } else if !sp.has_data() {
         let msg = match sp.source {
             crate::spectrum::Source::Input if !app.snap.caps.input_levels => {
@@ -863,9 +863,9 @@ fn spectrum(c: &mut Canvas, l: &Layout, app: &App) {
             }
             _ => "waiting for audio\u{2026}",
         };
-        c.left(l.content, vrow, msg, theme::FAINT);
+        c.left(l.content, vrow, msg, theme::faint());
     } else {
-        c.left(l.content, vrow, "no faults in this signal", theme::FAINT);
+        c.left(l.content, vrow, "no faults in this signal", theme::faint());
     }
 }
 
@@ -891,8 +891,8 @@ fn settings(c: &mut Canvas, l: &Layout, app: &App) {
     let outer = Field::at(x0, panel_w);
     let y0 = (l.h.saturating_sub(panel_h)) / 2;
     let y1 = y0 + panel_h - 1;
-    c.panel(outer, y0, y1, theme::FAINT, theme::BG);
-    c.text(outer, outer.x0 + 2, y0, " settings ", theme::FG, true);
+    c.panel(outer, y0, y1, theme::faint(), theme::bg());
+    c.text(outer, outer.x0 + 2, y0, " settings ", theme::fg(), true);
 
     let inner = Field::new(outer.x0 + 2, outer.x1 - 2);
     let value_x = inner.x1.saturating_sub(15);
@@ -903,22 +903,22 @@ fn settings(c: &mut Canvas, l: &Layout, app: &App) {
             break;
         }
         if let Some(section) = s.section() {
-            c.text(inner, inner.x0, y, section, theme::DIM, true);
+            c.text(inner, inner.x0, y, section, theme::dim(), true);
             y += 1;
         }
         let selected = i == app.setting;
         if selected {
-            c.tint(Field::new(inner.x0 - 1, inner.x1 + 1), y, theme::SEL_BG);
+            c.tint(Field::new(inner.x0 - 1, inner.x1 + 1), y, theme::sel_bg());
             // A marker as well as the tint: the selection has to be findable
             // in a screenshot, over SSH to a terminal with no colour, and by
             // anyone who cannot pick a dark blue background out of a dark one.
-            c.text(inner, inner.x0, y, c.g.sel, theme::CYAN, true);
+            c.text(inner, inner.x0, y, c.g.sel, theme::cyan(), true);
         }
-        let label_fg = if selected { theme::FG } else { theme::DIM };
+        let label_fg = if selected { theme::fg() } else { theme::dim() };
         c.text(inner, inner.x0 + 2, y, s.label(), label_fg, selected);
         // Values are right-aligned in their own column so the eye can run down
         // them; a changed setting is the one thing you want to spot instantly.
-        let value_fg = if selected { theme::CYAN } else { theme::FG };
+        let value_fg = if selected { theme::cyan() } else { theme::fg() };
         c.right(Field::new(value_x, inner.x1), y, &s.value(&app.cfg), value_fg);
         y += 1;
     }
@@ -927,7 +927,7 @@ fn settings(c: &mut Canvas, l: &Layout, app: &App) {
     // beside the value, because these are sentences.
     let note_y = y1 - 2;
     if let Some(s) = Setting::ALL.get(app.setting) {
-        c.left(inner, note_y, s.note(), theme::FAINT);
+        c.left(inner, note_y, s.note(), theme::faint());
     }
 
     let footer = match &app.save_status {
@@ -938,7 +938,7 @@ fn settings(c: &mut Canvas, l: &Layout, app: &App) {
             keys.into()
         }
     };
-    let fg = if app.save_status.is_some() { theme::YELLOW } else { theme::DIM };
+    let fg = if app.save_status.is_some() { theme::yellow() } else { theme::dim() };
     c.left(inner, y1 - 1, crate::grid::truncate(&footer, inner.width()), fg);
 }
 
@@ -961,8 +961,8 @@ fn help(c: &mut Canvas, l: &Layout, app: &App) {
     let outer = Field::at(x0, panel_w);
     let y0 = (l.h.saturating_sub(panel_h)) / 2;
     let y1 = y0 + panel_h - 1;
-    c.panel(outer, y0, y1, theme::FAINT, theme::BG);
-    c.text(outer, outer.x0 + 2, y0, " soundwatch ", theme::FG, true);
+    c.panel(outer, y0, y1, theme::faint(), theme::bg());
+    c.text(outer, outer.x0 + 2, y0, " soundwatch ", theme::fg(), true);
 
     let inner = Field::new(outer.x0 + 2, outer.x1 - 2);
     let keys: &[(&str, &str)] = &[
@@ -978,8 +978,8 @@ fn help(c: &mut Canvas, l: &Layout, app: &App) {
     ];
     let mut y = y0 + 2;
     for (k, desc) in keys {
-        c.text(inner, inner.x0, y, k, theme::CYAN, true);
-        c.text(inner, inner.x0 + 5, y, desc, theme::DIM, false);
+        c.text(inner, inner.x0, y, k, theme::cyan(), true);
+        c.text(inner, inner.x0 + 5, y, desc, theme::dim(), false);
         y += 1;
     }
 
@@ -991,21 +991,21 @@ fn help(c: &mut Canvas, l: &Layout, app: &App) {
     // explain the screen.
     let legend: &[(&str, Color, &str)] = match app.theme() {
         theme::Theme::Spec => &[
-            ("green", theme::GREEN, "output / playback path"),
-            ("cyan", theme::CYAN, "input / capture path"),
-            ("yellow", theme::YELLOW, "above -6 dBFS, or a conversion"),
-            ("red", theme::RED, theme::RED_RULE),
+            ("green", theme::green(), "output / playback path"),
+            ("cyan", theme::cyan(), "input / capture path"),
+            ("yellow", theme::yellow(), "above -6 dBFS, or a conversion"),
+            ("red", theme::red(), theme::RED_RULE),
         ],
         theme::Theme::Btop => &[
-            ("green", theme::GREEN, "output / playback path"),
-            ("cyan", theme::CYAN, "input / capture path"),
-            ("bars", theme::YELLOW, "shaded by height, not by meaning"),
-            ("red", theme::RED, "in text and headers only: something is wrong"),
+            ("green", theme::green(), "output / playback path"),
+            ("cyan", theme::cyan(), "input / capture path"),
+            ("bars", theme::yellow(), "shaded by height, not by meaning"),
+            ("red", theme::red(), "in text and headers only: something is wrong"),
         ],
     };
     for (name, col, desc) in legend {
         c.text(inner, inner.x0, y, name, *col, false);
-        c.text(inner, inner.x0 + 7, y, desc, theme::DIM, false);
+        c.text(inner, inner.x0 + 7, y, desc, theme::dim(), false);
         y += 1;
     }
 
@@ -1016,5 +1016,5 @@ fn help(c: &mut Canvas, l: &Layout, app: &App) {
             app.theme().name()
         )
     });
-    c.left(inner, y, &last, theme::FAINT);
+    c.left(inner, y, &last, theme::faint());
 }

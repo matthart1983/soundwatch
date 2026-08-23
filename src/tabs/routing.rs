@@ -30,17 +30,17 @@ pub fn draw(c: &mut Canvas, l: &Layout, app: &App) {
         }
         match dev {
             None => {
-                c.left(f, y, &format!("{label}  {}  nothing", arrow), theme::FAINT);
+                c.left(f, y, &format!("{label}  {}  nothing", arrow), theme::faint());
                 y += 1;
             }
             Some(d) => {
                 let n = app.snap.streams.iter().filter(|s| s.device_id == d.id).count();
-                let x = c.text(f, f.x0, y, label, theme::DIM, false);
+                let x = c.text(f, f.x0, y, label, theme::dim(), false);
                 let x = c.text(f, x + 1, y, arrow, theme::direction(d.direction.is_input()), true);
-                let x = c.text(f, x + 1, y, &format!("{n} streams"), theme::DIM, false);
-                let x = c.text(f, x + 2, y, c.g.arrow, theme::FAINT, false);
-                let x = c.text(f, x + 2, y, &d.name, theme::FG, true);
-                c.text(f, x + 1, y, &format!("({})", d.transport.name()), theme::DIM, false);
+                let x = c.text(f, x + 1, y, &format!("{n} streams"), theme::dim(), false);
+                let x = c.text(f, x + 2, y, c.g.arrow, theme::faint(), false);
+                let x = c.text(f, x + 2, y, &d.name, theme::fg(), true);
+                c.text(f, x + 1, y, &format!("({})", d.transport.name()), theme::dim(), false);
                 y += 1;
             }
         }
@@ -78,12 +78,12 @@ pub fn draw(c: &mut Canvas, l: &Layout, app: &App) {
             if y + 1 >= bottom {
                 break;
             }
-            c.left(f, y, &d.name, theme::FG);
+            c.left(f, y, &d.name, theme::fg());
             c.right(
                 f,
                 y,
                 &format!("{} \u{b7} clock domain {}", d.transport.name(), d.clock_domain),
-                theme::DIM,
+                theme::dim(),
             );
             y += 1;
             for (i, uid) in d.sub_device_uids.iter().enumerate() {
@@ -93,8 +93,8 @@ pub fn draw(c: &mut Canvas, l: &Layout, app: &App) {
                 let last = i + 1 == d.sub_device_uids.len();
                 let stem = if last { c.g.corner } else { c.g.tee };
                 let name = by_uid.get(uid.as_str()).copied().unwrap_or(uid.as_str());
-                let x = c.text(f, f.x0 + 2, y, stem, theme::FAINT, false);
-                c.text(f, x + 1, y, name, theme::DIM, false);
+                let x = c.text(f, f.x0 + 2, y, stem, theme::faint(), false);
+                c.text(f, x + 1, y, name, theme::dim(), false);
                 y += 1;
             }
         }
@@ -123,8 +123,8 @@ pub fn draw(c: &mut Canvas, l: &Layout, app: &App) {
         uniq.sort_unstable();
         uniq.dedup();
         let label = if domain == 0 { "unsynced".to_string() } else { format!("domain {domain}") };
-        let x = c.text(f, f.x0, y, &label, theme::DIM, false);
-        c.text(f, x + 2, y, &uniq.join(", "), theme::FG, false);
+        let x = c.text(f, f.x0, y, &label, theme::dim(), false);
+        c.text(f, x + 2, y, &uniq.join(", "), theme::fg(), false);
         y += 1;
     }
 }

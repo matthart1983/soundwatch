@@ -47,10 +47,10 @@ pub fn draw(c: &mut Canvas, l: &Layout, app: &App) {
         } else {
             format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
         };
-        c.right(f_when, row, &ago, theme::FAINT);
-        let fg = if e.kind.is_fault() { theme::RED } else { theme::CYAN };
+        c.right(f_when, row, &ago, theme::faint());
+        let fg = if e.kind.is_fault() { theme::red() } else { theme::cyan() };
         c.left(f_kind, row, e.kind.label(), fg);
-        c.left(f_what, row, &e.what, theme::FG);
+        c.left(f_what, row, &e.what, theme::fg());
     }
 
     if app.snap.events.len() > rows + app.scroll {
@@ -58,7 +58,7 @@ pub fn draw(c: &mut Canvas, l: &Layout, app: &App) {
             f,
             l.body_top + l.body_rows - 1,
             &format!("{} older", app.snap.events.len() - rows - app.scroll),
-            theme::FAINT,
+            theme::faint(),
         );
     }
 }

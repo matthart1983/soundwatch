@@ -18,9 +18,9 @@ pub fn draw(c: &mut Canvas, l: &Layout, app: &App) {
 
     // ── the headline ────────────────────────────────────────────────────────
     let total: u32 = app.snap.xrun_log.iter().map(|e| e.count).sum();
-    let fg = if app.snap.xruns_60s >= app.cfg.xrun_alert { theme::RED } else { theme::GREEN };
+    let fg = if app.snap.xruns_60s >= app.cfg.xrun_alert { theme::red() } else { theme::green() };
     super::tile(c, Field::at(f.x0, 14), y, "LAST 60s", &app.snap.xruns_60s.to_string(), fg);
-    super::tile(c, Field::at(f.x0 + 16, 14), y, "SESSION", &total.to_string(), theme::FG);
+    super::tile(c, Field::at(f.x0 + 16, 14), y, "SESSION", &total.to_string(), theme::fg());
     let devices: std::collections::BTreeSet<&str> =
         app.snap.xrun_log.iter().map(|e| e.device.as_str()).collect();
     super::tile(
@@ -29,7 +29,7 @@ pub fn draw(c: &mut Canvas, l: &Layout, app: &App) {
         y,
         "DEVICES AFFECTED",
         &if devices.is_empty() { "--".into() } else { devices.len().to_string() },
-        theme::FG,
+        theme::fg(),
     );
     super::tile(
         c,
@@ -37,7 +37,7 @@ pub fn draw(c: &mut Canvas, l: &Layout, app: &App) {
         y,
         "ALERTS AT",
         &format!("{} in 60s", app.cfg.xrun_alert),
-        theme::DIM,
+        theme::dim(),
     );
     y += 3;
 
@@ -75,10 +75,10 @@ pub fn draw(c: &mut Canvas, l: &Layout, app: &App) {
     // Newest first: the one you are chasing is the one that just happened.
     for (i, e) in app.snap.xrun_log.iter().rev().skip(app.scroll).take(rows).enumerate() {
         let row = y + i as u16;
-        c.right(f_when, row, &ago(app, e), theme::DIM);
-        let fg = if e.count >= app.cfg.xrun_alert { theme::RED } else { theme::YELLOW };
+        c.right(f_when, row, &ago(app, e), theme::dim());
+        let fg = if e.count >= app.cfg.xrun_alert { theme::red() } else { theme::yellow() };
         c.right(f_count, row, &e.count.to_string(), fg);
-        c.left(f_dev, row, &e.device, theme::FG);
+        c.left(f_dev, row, &e.device, theme::fg());
     }
 }
 

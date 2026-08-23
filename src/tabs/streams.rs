@@ -78,21 +78,21 @@ pub fn draw(c: &mut Canvas, l: &Layout, app: &App) {
         let y = top + 2 + i as u16;
         let idx = app.scroll + i;
         if idx == app.sel {
-            c.tint(l.content, y, theme::SEL_BG);
+            c.tint(l.content, y, theme::sel_bg());
         }
         let is_in = s.direction.is_input();
         let base = theme::direction(is_in);
 
-        c.left(f_app, y, &s.app, theme::FG);
-        c.right(f_pid, y, &s.pid.map(|p| p.to_string()).unwrap_or(fmt::NA.into()), theme::DIM);
+        c.left(f_app, y, &s.app, theme::fg());
+        c.right(f_pid, y, &s.pid.map(|p| p.to_string()).unwrap_or(fmt::NA.into()), theme::dim());
 
         if is_in {
             // The mic-in-use marker, as on the Lite screen: this is the column
             // that answers the question people actually open the tool for.
             c.text(f_dev, f_dev.x0, y, c.g.dot, base, false);
-            c.left(Field::new(f_dev.x0 + 2, f_dev.x1), y, &s.device, theme::DIM);
+            c.left(Field::new(f_dev.x0 + 2, f_dev.x1), y, &s.device, theme::dim());
         } else {
-            c.left(f_dev, y, &s.device, theme::DIM);
+            c.left(f_dev, y, &s.device, theme::dim());
         }
 
         let rate = if s.format.rate == 0 {
@@ -100,19 +100,19 @@ pub fn draw(c: &mut Canvas, l: &Layout, app: &App) {
         } else {
             fmt::rate_bits(s.format.rate, s.format.bits)
         };
-        c.right(f_rate, y, &rate, theme::DIM);
+        c.right(f_rate, y, &rate, theme::dim());
         c.right(
             f_lat,
             y,
             &s.latency_ms.map(|v| fmt::ms(v, 8)).unwrap_or(fmt::NA.into()),
-            theme::DIM,
+            theme::dim(),
         );
-        c.right(f_held, y, &fmt::hms(app.snap.at.secs_since(s.first_seen)), theme::FAINT);
+        c.right(f_held, y, &fmt::hms(app.snap.at.secs_since(s.first_seen)), theme::faint());
     }
 
     // The 60s sparkline column, when the width was there to reserve one.
     if let Some(f_spark) = f_spark {
-        c.left(f_spark, top, "60s", theme::DIM);
+        c.left(f_spark, top, "60s", theme::dim());
         for (i, s) in visible.iter().skip(app.scroll).take(rows).enumerate() {
             let y = top + 2 + i as u16;
             if let Some(h) = app.history_for(&s.key).filter(|h| h.has_data()) {
@@ -122,7 +122,7 @@ pub fn draw(c: &mut Canvas, l: &Layout, app: &App) {
                         f_spark.x0 + j as u16,
                         y,
                         meter::spark(*d, &c.g.blocks, app.cfg.meter_floor),
-                        theme::FAINT,
+                        theme::faint(),
                     );
                 }
             }
@@ -132,6 +132,6 @@ pub fn draw(c: &mut Canvas, l: &Layout, app: &App) {
     if visible.len() > rows {
         let last = (app.scroll + rows).min(visible.len());
         let range = format!("{}-{} of {}", app.scroll + 1, last, visible.len());
-        c.right(l.content, l.body_top + l.body_rows - 1, &range, theme::FAINT);
+        c.right(l.content, l.body_top + l.body_rows - 1, &range, theme::faint());
     }
 }

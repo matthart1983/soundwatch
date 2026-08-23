@@ -63,9 +63,9 @@ pub fn draw(c: &mut Canvas, l: &Layout, app: &App) {
         None => fmt::NA.to_string(),
     };
     let fg = match total {
-        Some(ms) if ms > 40.0 => theme::YELLOW,
-        Some(_) => theme::GREEN,
-        None => theme::DIM,
+        Some(ms) if ms > 40.0 => theme::yellow(),
+        Some(_) => theme::green(),
+        None => theme::dim(),
     };
     c.left(f, y, &text, fg);
     y += 2;
@@ -78,7 +78,7 @@ pub fn draw(c: &mut Canvas, l: &Layout, app: &App) {
             Some(_) => "comfortable for live monitoring",
             None => "no device on either path",
         };
-        c.left(f, y, note, theme::FAINT);
+        c.left(f, y, note, theme::faint());
     }
 }
 
@@ -87,7 +87,7 @@ fn path(c: &mut Canvas, f: Field, mut y: u16, d: &Device, bottom: u16) -> u16 {
     let rate = d.format.rate.max(1) as f32;
     let ms = |frames: u32| frames as f32 * 1000.0 / rate;
 
-    c.left(f, y, &format!("{}  {}", d.name, d.transport.name()), theme::DIM);
+    c.left(f, y, &format!("{}  {}", d.name, d.transport.name()), theme::dim());
     y += 1;
 
     let parts: [(&str, u32, bool); 4] = [
@@ -105,13 +105,13 @@ fn path(c: &mut Canvas, f: Field, mut y: u16, d: &Device, bottom: u16) -> u16 {
         if y >= bottom {
             return y;
         }
-        c.left(Field::at(f.x0 + 2, 16), y, label, theme::DIM);
-        c.right(Field::at(f.x0 + 19, 8), y, &fmt::frames(frames), theme::FG);
-        c.right(Field::at(f.x0 + 29, 9), y, &fmt::ms(ms(frames), 9), theme::FG);
+        c.left(Field::at(f.x0 + 2, 16), y, label, theme::dim());
+        c.right(Field::at(f.x0 + 19, 8), y, &fmt::frames(frames), theme::fg());
+        c.right(Field::at(f.x0 + 29, 9), y, &fmt::ms(ms(frames), 9), theme::fg());
         let filled = (frames as f32 / peak as f32 * bar_w as f32).round() as u16;
         // Only the buffer is yours to change; the rest is the hardware's, and
         // colouring them the same would imply otherwise.
-        let fg = if yours { theme::CYAN } else { theme::FAINT };
+        let fg = if yours { theme::cyan() } else { theme::faint() };
         for i in 0..filled.min(bar_w) {
             c.set(f.x0 + 40 + i, y, c.g.blocks[7], fg);
         }
@@ -122,9 +122,9 @@ fn path(c: &mut Canvas, f: Field, mut y: u16, d: &Device, bottom: u16) -> u16 {
         return y;
     }
     let total_frames = d.buffer_frames + d.latency_frames;
-    c.left(Field::at(f.x0 + 2, 16), y, "total", theme::DIM);
-    c.right(Field::at(f.x0 + 19, 8), y, &fmt::frames(total_frames), theme::FG);
-    c.right(Field::at(f.x0 + 29, 9), y, &fmt::ms(ms(total_frames), 9), theme::BR_WHITE);
+    c.left(Field::at(f.x0 + 2, 16), y, "total", theme::dim());
+    c.right(Field::at(f.x0 + 19, 8), y, &fmt::frames(total_frames), theme::fg());
+    c.right(Field::at(f.x0 + 29, 9), y, &fmt::ms(ms(total_frames), 9), theme::br_white());
     y += 1;
 
     if y < bottom
@@ -135,7 +135,7 @@ fn path(c: &mut Canvas, f: Field, mut y: u16, d: &Device, bottom: u16) -> u16 {
         } else {
             format!("buffer range {lo}-{hi}fr \u{b7} lower it to trade headroom for latency")
         };
-        c.left(Field::new(f.x0 + 2, f.x1), y, &hint, theme::FAINT);
+        c.left(Field::new(f.x0 + 2, f.x1), y, &hint, theme::faint());
         y += 1;
     }
     y

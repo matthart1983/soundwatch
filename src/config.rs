@@ -32,6 +32,9 @@ pub const REFRESH_RATES: [u64; 4] = [10, 20, 30, 60];
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Config {
     pub theme: Theme,
+    /// Which colours, as opposed to how charts are drawn. `theme` is the other
+    /// axis: it decides how charts are *drawn*, not what they are coloured in.
+    pub palette: crate::theme::Palette,
     /// ASCII stand-ins for glyphs that are not reliably single-width.
     pub ascii: bool,
     /// Bottom of the meters' scale, in dBFS.
@@ -65,6 +68,7 @@ impl Default for Config {
         // code they are pinning.
         Self {
             theme: Theme::Spec,
+            palette: crate::theme::default_palette(),
             ascii: false,
             meter_floor: crate::meter::FLOOR_DBFS,
             spectrum_floor: crate::dsp::FLOOR_DBFS,
@@ -105,6 +109,11 @@ impl Config {
             let Some((key, value)) = line.split_once('=') else { continue };
             let (key, value) = (key.trim(), value.trim().trim_matches('"'));
             match key {
+                "palette" => {
+                    if let Some(p) = crate::theme::palette_by_name(value) {
+                        c.palette = p;
+                    }
+                }
                 "theme" => {
                     if let Some(t) = Theme::parse(value) {
                         c.theme = t;
@@ -149,6 +158,7 @@ impl Config {
         s.push_str("# soundwatch settings. Written by the `,` menu.\n");
         s.push_str("# Delete this file to go back to the defaults.\n\n");
         let _ = writeln!(s, "theme = \"{}\"", self.theme.name());
+        let _ = writeln!(s, "palette = \"{}\"", self.palette.name);
         let _ = writeln!(s, "ascii = {}", self.ascii);
         let _ = writeln!(s, "lite = {}", self.lite);
         let _ = writeln!(s, "meter_input = {}", self.meter_input);
@@ -214,6 +224,7 @@ fn set_f32(slot: &mut f32, value: &str, lo: f32, hi: f32) {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Setting {
     Theme,
+    Palette,
     Ascii,
     Lite,
     MeterFloor,
@@ -227,8 +238,9 @@ pub enum Setting {
 }
 
 impl Setting {
-    pub const ALL: [Setting; 11] = [
+    pub const ALL: [Setting; 12] = [
         Setting::Theme,
+        Setting::Palette,
         Setting::Ascii,
         Setting::Lite,
         Setting::MeterFloor,
@@ -253,6 +265,7 @@ impl Setting {
 
     pub fn label(self) -> &'static str {
         match self {
+            Setting::Palette => "palette",
             Setting::Theme => "theme",
             Setting::Ascii => "glyphs",
             Setting::Lite => "screen",
@@ -270,6 +283,7 @@ impl Setting {
     /// One line saying what the setting costs you, not what it is called.
     pub fn note(self) -> &'static str {
         match self {
+            Setting::Palette => "terminal inherits your terminal's colours; spec pins its own",
             Setting::Theme => "btop shades bars by height; spec colours them by meaning",
             Setting::Ascii => "ascii is safe on terminals with thin glyph coverage",
             Setting::Lite => "lite is the handoff's one screen; full is the ten tabs",
@@ -286,6 +300,7 @@ impl Setting {
 
     pub fn value(self, c: &Config) -> String {
         match self {
+            Setting::Palette => c.palette.name.into(),
             Setting::Theme => c.theme.name().into(),
             Setting::Ascii => if c.ascii { "ascii" } else { "unicode" }.into(),
             Setting::Lite => if c.lite { "lite" } else { "full" }.into(),
@@ -309,6 +324,17 @@ impl Setting {
     /// Step this setting one place. `delta` is `+1` or `-1`.
     pub fn adjust(self, c: &mut Config, delta: i32) {
         match self {
+            Setting::Palette => {
+                // Applied to the live palette immediately, not just stored:
+                // the overlay is how you compare them, so it has to recolour
+                // under the cursor.
+                c.palette = if c.palette.name == "terminal" {
+                    crate::theme::spec()
+                } else {
+                    crate::theme::terminal()
+                };
+                crate::theme::set_palette(c.palette);
+            }
             Setting::Theme => {
                 c.theme = if c.theme == Theme::Spec { Theme::Btop } else { Theme::Spec }
             }

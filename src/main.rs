@@ -63,6 +63,11 @@ OPTIONS:
     --meter-input     also meter the default input device. Off by default: it
                       opens a capture stream, so this tool then shows up in the
                       mic-in-use audit it is here to report.
+    --palette <NAME>  terminal (default) or spec. terminal pins no colours of
+                      its own — every slot resolves to an ANSI entry and
+                      foreground/background use the terminal's, so a terminal
+                      profile, pywal or a system-wide rice carries through.
+                      spec is the design handoff's fixed hexes.
     --theme <NAME>    spec (default) or btop. btop colours every bar as a
                       vertical gradient and draws charts in braille for twice
                       the horizontal resolution; spec keeps the handoff's four
@@ -122,6 +127,12 @@ fn parse_args() -> Result<Args, String> {
                 a.cfg.theme = theme::Theme::parse(&name)
                     .ok_or_else(|| format!("unknown theme: {name} (try spec or btop)"))?;
             }
+            "--palette" => {
+                let name = it.next().ok_or("--palette needs a name")?;
+                a.cfg.palette = theme::palette_by_name(&name).ok_or_else(|| {
+                    format!("unknown palette: {name} (try {})", theme::PALETTE_NAMES.join(" or "))
+                })?;
+            }
             "--defaults" => a.cfg = config::Config::default(),
             "--lite" => a.cfg.lite = true,
             "--demo" => a.demo = true,
@@ -152,6 +163,10 @@ fn main() {
             std::process::exit(2);
         }
     };
+
+    // Install the palette once, before anything can draw. Every render path
+    // below — probe, demo, --once and live — reads it through `theme::active`.
+    theme::set_palette(args.cfg.palette);
 
     // --demo and --once never meter, so they never ask for anything.
     let wants_metering = !args.demo && args.once.is_none();
@@ -520,17 +535,48 @@ fn buffer_to_string(buf: &Buffer, color: bool) -> String {
     out
 }
 
+/// One cell's colours as SGR.
+///
+/// `base` is 30 for a foreground and 40 for a background; the bright variants
+/// are the same plus 60. Every `Color` ratatui can hold has to be encoded here,
+/// not just `Rgb`: the default palette resolves to named ANSI slots, and an
+/// encoder that only understood truecolor rendered `--once` in no colour at all
+/// — which is exactly the state `--once` exists to let you review.
+fn sgr(c: Color, base: u8) -> String {
+    let n = |offset: u8| format!("\x1b[{}m", base + offset);
+    match c {
+        Color::Rgb(r, g, b) => format!("\x1b[{};2;{r};{g};{b}m", base + 8),
+        Color::Indexed(i) => format!("\x1b[{};5;{i}m", base + 8),
+        // 39 / 49: back to the terminal's own default, which is the whole
+        // point of the terminal palette.
+        Color::Reset => n(9),
+        Color::Black => n(0),
+        Color::Red => n(1),
+        Color::Green => n(2),
+        Color::Yellow => n(3),
+        Color::Blue => n(4),
+        Color::Magenta => n(5),
+        Color::Cyan => n(6),
+        // ratatui's `Gray` is ANSI white (37); `White` is the bright one (97).
+        Color::Gray => n(7),
+        Color::DarkGray => n(60),
+        Color::LightRed => n(61),
+        Color::LightGreen => n(62),
+        Color::LightYellow => n(63),
+        Color::LightBlue => n(64),
+        Color::LightMagenta => n(65),
+        Color::LightCyan => n(66),
+        Color::White => n(67),
+    }
+}
+
 fn ansi(fg: Color, bg: Color, m: Modifier) -> String {
-    let rgb = |c: Color, base: u8| match c {
-        Color::Rgb(r, g, b) => format!("\x1b[{base};2;{r};{g};{b}m"),
-        _ => String::new(),
-    };
     let mut s = String::from("\x1b[0m");
     if m.contains(Modifier::BOLD) {
         s.push_str("\x1b[1m");
     }
-    s.push_str(&rgb(fg, 38));
-    s.push_str(&rgb(bg, 48));
+    s.push_str(&sgr(fg, 30));
+    s.push_str(&sgr(bg, 40));
     s
 }
 
@@ -997,6 +1043,47 @@ mod tests {
             let bars = f.iter().filter(|l| l.contains('\u{2588}')).count();
             assert!(bars >= 4, "only {bars} rows of graph at {w}x{h}");
         }
+    }
+
+    /// Same failure mode as the btop theme below: a palette that the parser
+    /// accepts and the renderer ignores. The escape codes are what the terminal
+    /// actually receives, so assert on those rather than on the glyphs.
+    #[test]
+    fn the_palette_reaches_the_screen() {
+        let _g = theme::exclusive_palette(theme::spec());
+        let spec_frame = {
+            let mut app = App::demo(config::Config {
+                palette: theme::spec(),
+                lite: true,
+                ..Default::default()
+            });
+            theme::set_palette(theme::spec());
+            render_once_at(&mut app, "main", true, 120, 40).expect("render")
+        };
+        let term_frame = {
+            let mut app = App::demo(config::Config {
+                palette: theme::terminal(),
+                lite: true,
+                ..Default::default()
+            });
+            theme::set_palette(theme::terminal());
+            render_once_at(&mut app, "main", true, 120, 40).expect("render")
+        };
+        theme::set_palette(theme::spec());
+
+        assert_ne!(spec_frame, term_frame, "the palette changed nothing on screen");
+        assert!(spec_frame.contains("38;2;"), "the spec palette stopped emitting truecolor");
+        assert!(
+            !term_frame.contains("38;2;"),
+            "the terminal palette leaked truecolor: it must resolve to ANSI slots only"
+        );
+        // ...and it must actually emit colour, not merely stop emitting RGB.
+        // The first version of this test asserted only the absence of "38;2;",
+        // which a frame with no colour at all passes.
+        assert!(
+            term_frame.contains("\u{1b}[32m") || term_frame.contains("\u{1b}[36m"),
+            "the terminal palette emitted no ANSI colour at all"
+        );
     }
 
     /// The btop theme has to reach the screen, not just the argument parser.

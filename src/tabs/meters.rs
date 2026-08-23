@@ -28,7 +28,7 @@ pub fn draw(c: &mut Canvas, l: &Layout, app: &App) {
     for (title, base, live, peak_h, rms_h, dev) in [
         (
             "output",
-            theme::GREEN,
+            theme::green(),
             app.snap.caps.device_levels,
             &app.out_hist,
             &app.out_rms,
@@ -36,7 +36,7 @@ pub fn draw(c: &mut Canvas, l: &Layout, app: &App) {
         ),
         (
             "input",
-            theme::CYAN,
+            theme::cyan(),
             app.snap.caps.input_levels,
             &app.in_hist,
             &app.in_rms,
@@ -94,7 +94,7 @@ fn panel(
         top,
         "PEAK",
         &peak.map(fmt::dbfs).unwrap_or_else(na),
-        theme::BR_WHITE,
+        theme::br_white(),
     );
     super::tile(
         c,
@@ -102,7 +102,7 @@ fn panel(
         top,
         "RMS",
         &rms.map(fmt::dbfs).unwrap_or_else(na),
-        theme::FG,
+        theme::fg(),
     );
 
     // Crest factor: the whole reason RMS is here.
@@ -111,9 +111,9 @@ fn panel(
         _ => None,
     };
     let crest_fg = match crest {
-        Some(cf) if cf < SQUASHED_CREST_DB => theme::YELLOW,
-        Some(_) => theme::GREEN,
-        None => theme::DIM,
+        Some(cf) if cf < SQUASHED_CREST_DB => theme::yellow(),
+        Some(_) => theme::green(),
+        None => theme::dim(),
     };
     super::tile(
         c,
@@ -129,7 +129,7 @@ fn panel(
         top,
         "PEAK HOLD",
         &hold.map(fmt::dbfs).unwrap_or_else(na),
-        theme::DIM,
+        theme::dim(),
     );
     if let Some(cf) = crest
         && cf < SQUASHED_CREST_DB
@@ -138,7 +138,7 @@ fn panel(
             Field::new(f.x0 + 55, f.x1),
             top + 1,
             "squashed \u{2014} a limiter, a codec, or a compressor left on",
-            theme::YELLOW,
+            theme::yellow(),
         );
     }
 
@@ -150,9 +150,9 @@ fn panel(
     let rows = bottom - chart_top;
     if !live || !peak_h.has_data() {
         for x in f.x0..=f.x1 {
-            c.set(x, bottom - 1, c.g.blocks[0], theme::FAINT);
+            c.set(x, bottom - 1, c.g.blocks[0], theme::faint());
         }
-        c.left(f, chart_top, "not metered on this path", theme::FAINT);
+        c.left(f, chart_top, "not metered on this path", theme::faint());
         return bottom;
     }
 
@@ -174,7 +174,7 @@ fn panel(
                 .fold(f32::NEG_INFINITY, f32::max);
             let height = theme::row_height(gy as u16, rows);
             let fg = if app.paused {
-                theme::FAINT
+                theme::faint()
             } else {
                 theme::chart_cell(app.theme(), base, d, height)
             };
@@ -188,7 +188,7 @@ fn panel(
         if h > 0 && h <= rows {
             // Red at the top of the scale whatever the theme: a peak cap is
             // the one mark on this screen that means "you are about to clip".
-            let fg = if *d >= -0.1 { theme::RED } else { theme::BR_WHITE };
+            let fg = if *d >= -0.1 { theme::red() } else { theme::br_white() };
             c.set(f.x0 + i as u16, bottom - h, c.g.rms, fg);
         }
     }

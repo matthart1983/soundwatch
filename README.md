@@ -107,6 +107,7 @@ are shed — from the *second* to last, never the last, because the last one is
 | `--demo` | drive the UI from deterministic fixtures; opens nothing |
 | `--lite` | the original single screen, at the handoff's exact rows |
 | `--meter-input` | also meter the default input device (see [Input](#input-is-opt-in)) |
+| `--palette <name>` | `terminal` (default) or `spec` — see [Palettes](#palettes) |
 | `--theme <name>` | `spec` (default) or `btop` — see [Themes](#themes) |
 | `--ascii` | ASCII stand-ins for glyphs that are not reliably single-width |
 | `--once <state>` | render one frame to stdout and exit — any tab by name, or `main`, `paused`, `filter`, `detail`, `alert`, `help`, `settings` |
@@ -175,6 +176,28 @@ at the one moment you needed it.
 themselves.** A fresh install behaves identically to the version that had no
 settings menu; a setting is somewhere to depart from the design, not a
 substitute for having one.
+
+## Palettes
+
+**SoundWatch defers to your terminal's palette by default.** It pins no colours
+of its own: every slot resolves to an ANSI entry and foreground/background use
+`Reset`, so a terminal profile, pywal, matugen or a system-wide rice carries
+straight through and SoundWatch sits beside your other tools instead of
+fighting them.
+
+`--palette spec` is the design handoff's fixed hexes, if you want the look the
+screenshots were taken in regardless of the terminal.
+
+Two compromises the 16-colour palette forces. There is no ANSI orange, so the
+btop gradient's warm stop takes bright red — it still climbs in the right
+direction, but as a step rather than a blend. And with no intermediate shades
+to blend through, that gradient becomes four discrete bands rather than a ramp;
+it degrades visibly rather than collapsing to one flat colour, which would look
+identical to the gradient being switched off.
+
+Palette and theme are independent axes — *which colours* versus *how charts are
+drawn* — and they compose: `--palette spec --theme btop` is the original btop
+look.
 
 ## Themes
 

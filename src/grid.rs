@@ -273,7 +273,7 @@ impl<'a> Canvas<'a> {
         let [h, v, tl, tr, br, bl] = self.g.box_chars;
         for y in y0..=y1 {
             for x in f.x0..=f.x1 {
-                self.set(x, y, ' ', crate::theme::FG);
+                self.set(x, y, ' ', crate::theme::fg());
             }
             self.tint(f, y, bg);
         }
@@ -298,7 +298,7 @@ impl<'a> Canvas<'a> {
                 if let Some(c) = self.cell(x, y) {
                     c.set_char(' ');
                     c.set_bg(bg);
-                    c.set_fg(crate::theme::FG);
+                    c.set_fg(crate::theme::fg());
                     c.set_style(Style::default());
                 }
             }

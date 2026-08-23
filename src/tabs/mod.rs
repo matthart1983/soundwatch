@@ -156,7 +156,7 @@ impl BarStyle {
 /// even at the reference 130 columns the full form does not quite fit — hence
 /// the middle steps.
 pub fn bar(c: &mut Canvas, l: &Layout, app: &App) {
-    c.rule(Field::new(0, l.w - 1), l.row_tab_rule, theme::FAINT);
+    c.rule(Field::new(0, l.w - 1), l.row_tab_rule, theme::faint());
 
     let style = [BarStyle::Full, BarStyle::Names, BarStyle::Packed]
         .into_iter()
@@ -174,25 +174,25 @@ pub fn bar(c: &mut Canvas, l: &Layout, app: &App) {
         let field = Field::new(x, x + w - 1);
         let indent = if style.pad() == 2 { 1 } else { 0 };
         if active {
-            c.tint(field, l.row_tab_bar, theme::BG);
-            c.text(field, x + indent, l.row_tab_bar, &label, theme::CYAN, true);
+            c.tint(field, l.row_tab_bar, theme::bg());
+            c.text(field, x + indent, l.row_tab_bar, &label, theme::cyan(), true);
             // Inset: clear the rule under the active tab and turn the corners
             // up into it, so the tab reads as continuous with the body below.
             for i in 0..w {
-                c.set(x + i, l.row_tab_rule, ' ', theme::BG);
+                c.set(x + i, l.row_tab_rule, ' ', theme::bg());
             }
             let [_, _, _, _, br, bl] = c.g.box_chars;
-            c.set(x, l.row_tab_rule, br, theme::FAINT);
-            c.set(x + w - 1, l.row_tab_rule, bl, theme::FAINT);
+            c.set(x, l.row_tab_rule, br, theme::faint());
+            c.set(x + w - 1, l.row_tab_rule, bl, theme::faint());
         } else {
             let digits = format!("[{}]", t.digit());
-            let dx = c.text(field, x + indent, l.row_tab_bar, &digits, theme::DIM, false);
+            let dx = c.text(field, x + indent, l.row_tab_bar, &digits, theme::dim(), false);
             if style != BarStyle::Digits {
-                let nx = c.text(field, dx + 1, l.row_tab_bar, t.name(), theme::FG, false);
+                let nx = c.text(field, dx + 1, l.row_tab_bar, t.name(), theme::fg(), false);
                 if style == BarStyle::Full
                     && let Some(n) = t.badge(app)
                 {
-                    c.text(field, nx, l.row_tab_bar, &format!(" {n}"), theme::DIM, false);
+                    c.text(field, nx, l.row_tab_bar, &format!(" {n}"), theme::dim(), false);
                 }
             }
         }
@@ -220,8 +220,8 @@ pub fn body(c: &mut Canvas, l: &Layout, app: &App) {
 
 /// A titled section rule: `── title ──────────`.
 pub fn section(c: &mut Canvas, f: Field, y: u16, title: &str) {
-    c.rule(f, y, theme::FAINT);
-    c.text(f, f.x0 + 1, y, &format!(" {title} "), theme::DIM, true);
+    c.rule(f, y, theme::faint());
+    c.text(f, f.x0 + 1, y, &format!(" {title} "), theme::dim(), true);
 }
 
 /// A KPI tile: a big value with a caption under it, in a fixed-width column.
@@ -230,7 +230,7 @@ pub fn section(c: &mut Canvas, f: Field, y: u16, title: &str) {
 /// is always "is anything wrong", and a number you have to read a table to
 /// find is a number you did not read.
 pub fn tile(c: &mut Canvas, f: Field, y: u16, caption: &str, value: &str, fg: Color) {
-    c.text(f, f.x0, y, caption, theme::DIM, false);
+    c.text(f, f.x0, y, caption, theme::dim(), false);
     c.text(f, f.x0, y + 1, value, fg, true);
 }
 
@@ -238,17 +238,17 @@ pub fn tile(c: &mut Canvas, f: Field, y: u16, caption: &str, value: &str, fg: Co
 pub fn table_head(c: &mut Canvas, l: &Layout, y: u16, cols: &[(Field, &str, bool)]) {
     for (f, name, right) in cols {
         if *right {
-            c.right(*f, y, name, theme::DIM);
+            c.right(*f, y, name, theme::dim());
         } else {
-            c.left(*f, y, name, theme::DIM);
+            c.left(*f, y, name, theme::dim());
         }
     }
-    c.rule(l.content, y + 1, theme::FAINT);
+    c.rule(l.content, y + 1, theme::faint());
 }
 
 /// What to say when a panel has nothing to show, and why.
 pub fn empty(c: &mut Canvas, f: Field, y: u16, msg: &str) {
-    c.left(f, y, msg, theme::FAINT);
+    c.left(f, y, msg, theme::faint());
 }
 
 #[cfg(test)]

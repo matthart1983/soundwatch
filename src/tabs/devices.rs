@@ -61,7 +61,7 @@ pub fn draw(c: &mut Canvas, l: &Layout, app: &App) {
         let y = top + 2 + i as u16;
         let selected = app.scroll + i == app.sel;
         if selected {
-            c.tint(l.content, y, theme::SEL_BG);
+            c.tint(l.content, y, theme::sel_bg());
         }
 
         let base = theme::direction(d.direction.is_input());
@@ -69,9 +69,9 @@ pub fn draw(c: &mut Canvas, l: &Layout, app: &App) {
         // talking about, so it is the one thing marked here.
         if d.is_default {
             c.text(f_name, f_name.x0, y, c.g.dot, base, false);
-            c.left(Field::new(f_name.x0 + 2, f_name.x1), y, &d.name, theme::FG);
+            c.left(Field::new(f_name.x0 + 2, f_name.x1), y, &d.name, theme::fg());
         } else {
-            c.left(Field::new(f_name.x0 + 2, f_name.x1), y, &d.name, theme::DIM);
+            c.left(Field::new(f_name.x0 + 2, f_name.x1), y, &d.name, theme::dim());
         }
         // The maker, when it fits and adds something the name does not. Two
         // interfaces from different vendors can carry the same model name.
@@ -81,7 +81,7 @@ pub fn draw(c: &mut Canvas, l: &Layout, app: &App) {
         {
             let used = 2 + crate::grid::width(&d.name);
             if used + 2 + crate::grid::width(m) <= f_name.width() {
-                c.text(f_name, f_name.x0 + used + 2, y, m, theme::FAINT, false);
+                c.text(f_name, f_name.x0 + used + 2, y, m, theme::faint(), false);
             }
         }
 
@@ -89,25 +89,25 @@ pub fn draw(c: &mut Canvas, l: &Layout, app: &App) {
 
         // A lossy transport is the answer to "why does this sound wrong" often
         // enough to earn a colour of its own.
-        let t_fg = if d.transport.is_lossy_path() { theme::YELLOW } else { theme::DIM };
+        let t_fg = if d.transport.is_lossy_path() { theme::yellow() } else { theme::dim() };
         c.left(f_transport, y, d.transport.name(), t_fg);
 
-        c.right(f_rate, y, &fmt::rate_bits(d.format.rate, d.format.bits), theme::DIM);
-        c.right(f_ch, y, &d.format.channels.to_string(), theme::DIM);
-        c.right(f_buf, y, &fmt::frames(d.buffer_frames), theme::DIM);
+        c.right(f_rate, y, &fmt::rate_bits(d.format.rate, d.format.bits), theme::dim());
+        c.right(f_ch, y, &d.format.channels.to_string(), theme::dim());
+        c.right(f_buf, y, &fmt::frames(d.buffer_frames), theme::dim());
         c.right(
             f_lat,
             y,
             &d.latency_ms().map(|v| fmt::ms(v, 8)).unwrap_or(fmt::NA.into()),
-            theme::DIM,
+            theme::dim(),
         );
 
         let (state, fg) = if !d.is_alive {
-            ("dead", theme::RED)
+            ("dead", theme::red())
         } else if d.is_running {
-            ("running", theme::GREEN)
+            ("running", theme::green())
         } else {
-            ("idle", theme::FAINT)
+            ("idle", theme::faint())
         };
         c.left(f_state, y, state, fg);
     }
@@ -115,7 +115,7 @@ pub fn draw(c: &mut Canvas, l: &Layout, app: &App) {
     if app.snap.devices.len() > rows {
         let last = (app.scroll + rows).min(app.snap.devices.len());
         let range = format!("{}-{} of {}", app.scroll + 1, last, app.snap.devices.len());
-        c.right(l.content, l.body_top + l.body_rows - 1, &range, theme::FAINT);
+        c.right(l.content, l.body_top + l.body_rows - 1, &range, theme::faint());
     }
 }
 

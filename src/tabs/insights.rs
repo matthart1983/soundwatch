@@ -36,9 +36,9 @@ impl Severity {
 
     pub fn colour(self) -> ratatui::style::Color {
         match self {
-            Severity::Fault => theme::RED,
-            Severity::Warn => theme::YELLOW,
-            Severity::Note => theme::CYAN,
+            Severity::Fault => theme::red(),
+            Severity::Warn => theme::yellow(),
+            Severity::Note => theme::cyan(),
         }
     }
 }
@@ -215,7 +215,7 @@ pub fn draw(c: &mut Canvas, l: &Layout, app: &App) {
     let items = collect(app);
     if items.is_empty() {
         super::section(c, f, y, "insights");
-        c.left(f, y + 2, "nothing to report \u{2014} the audio path looks healthy", theme::GREEN);
+        c.left(f, y + 2, "nothing to report \u{2014} the audio path looks healthy", theme::green());
         return;
     }
 
@@ -231,16 +231,16 @@ pub fn draw(c: &mut Canvas, l: &Layout, app: &App) {
             c.set(f.x0, y + dy, c.g.blocks[7], i.severity.colour());
         }
         let x = c.text(f, f.x0 + 2, y, i.severity.badge(), i.severity.colour(), true);
-        c.text(f, x + 2, y, &i.title, theme::FG, true);
+        c.text(f, x + 2, y, &i.title, theme::fg(), true);
         for (n, line) in body.iter().enumerate() {
-            c.left(body_field, y + 1 + n as u16, line, theme::DIM);
+            c.left(body_field, y + 1 + n as u16, line, theme::dim());
         }
         c.text(
             body_field,
             f.x0 + 2,
             y + card - 1,
             &format!("[{}] {}", i.goto.digit(), i.goto.name()),
-            theme::CYAN,
+            theme::cyan(),
             false,
         );
         y += card + 1;

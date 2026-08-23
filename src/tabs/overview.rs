@@ -28,10 +28,10 @@ pub fn draw(c: &mut Canvas, l: &Layout, app: &App) {
         .map(fmt::dbfs)
         .unwrap_or_else(na);
     let level_fg = match app.out_hist.current().filter(|_| snap.caps.device_levels) {
-        Some(d) => theme::level(d, theme::GREEN),
-        None => theme::DIM,
+        Some(d) => theme::level(d, theme::green()),
+        None => theme::dim(),
     };
-    let xrun_fg = if snap.xruns_60s >= app.cfg.xrun_alert { theme::RED } else { theme::FG };
+    let xrun_fg = if snap.xruns_60s >= app.cfg.xrun_alert { theme::red() } else { theme::fg() };
     let lat = snap.latency_ms().map(|v| fmt::ms(v, 9)).unwrap_or_else(na);
 
     let tiles: [(&str, String, ratatui::style::Color); 5] = [
@@ -39,10 +39,10 @@ pub fn draw(c: &mut Canvas, l: &Layout, app: &App) {
         (
             "RATE",
             out.map(|d| fmt::rate_bits(d.format.rate, d.format.bits)).unwrap_or_else(na),
-            theme::FG,
+            theme::fg(),
         ),
-        ("BUFFER", out.map(|d| fmt::frames(d.buffer_frames)).unwrap_or_else(na), theme::FG),
-        ("LATENCY", lat, theme::FG),
+        ("BUFFER", out.map(|d| fmt::frames(d.buffer_frames)).unwrap_or_else(na), theme::fg()),
+        ("LATENCY", lat, theme::fg()),
         ("XRUNS 60s", snap.xruns_60s.to_string(), xrun_fg),
     ];
     let tile_w = (f.width() / tiles.len() as u16).max(10);
@@ -92,31 +92,31 @@ pub fn draw(c: &mut Canvas, l: &Layout, app: &App) {
     for (i, s) in visible.iter().take(rows).enumerate() {
         let row = y + i as u16;
         let is_in = s.direction.is_input();
-        c.left(f_app, row, &s.app, theme::FG);
+        c.left(f_app, row, &s.app, theme::fg());
         if is_in {
-            c.text(f_dev, f_dev.x0, row, c.g.dot, theme::CYAN, false);
-            c.left(Field::new(f_dev.x0 + 2, f_dev.x1), row, &s.device, theme::DIM);
+            c.text(f_dev, f_dev.x0, row, c.g.dot, theme::cyan(), false);
+            c.left(Field::new(f_dev.x0 + 2, f_dev.x1), row, &s.device, theme::dim());
         } else {
-            c.left(f_dev, row, &s.device, theme::DIM);
+            c.left(f_dev, row, &s.device, theme::dim());
         }
         let rate = if s.format.rate == 0 {
             fmt::NA.to_string()
         } else {
             fmt::rate_bits(s.format.rate, s.format.bits)
         };
-        c.right(f_rate, row, &rate, theme::DIM);
-        c.right(f_lat, row, &s.latency_ms.map(|v| fmt::ms(v, 8)).unwrap_or_else(na), theme::DIM);
+        c.right(f_rate, row, &rate, theme::dim());
+        c.right(f_lat, row, &s.latency_ms.map(|v| fmt::ms(v, 8)).unwrap_or_else(na), theme::dim());
     }
 
     // ── insights strip ──────────────────────────────────────────────────────
     if let Some(top) = insights.first() {
         let row = bottom - 1;
-        c.rule(f, row - 1, theme::FAINT);
+        c.rule(f, row - 1, theme::faint());
         let x = c.text(f, f.x0, row, top.severity.badge(), top.severity.colour(), true);
-        let x = c.text(f, x + 2, row, &top.title, theme::FG, false);
+        let x = c.text(f, x + 2, row, &top.title, theme::fg(), false);
         let more = insights.len().saturating_sub(1);
         let tail =
             if more > 0 { format!("  [0] Insights (+{more})") } else { "  [0] Insights".into() };
-        c.text(f, x, row, &tail, theme::CYAN, false);
+        c.text(f, x, row, &tail, theme::cyan(), false);
     }
 }
